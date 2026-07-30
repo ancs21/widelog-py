@@ -1,0 +1,17 @@
+# Cloudflare Pages response headers.
+#
+# Every page already carries <link rel="alternate" type="text/markdown"> in its
+# head. These repeat it as a Link header (RFC 8288) so an agent that issues a
+# HEAD request, or reads headers before parsing a body, finds the markdown
+# without downloading and parsing the HTML first.
+
+/*
+  Link: </llms.txt>; rel="service-doc"; type="text/plain"
+
+# Nimbus writes the markdown beside each page as index.md. The two rules cover
+# the two shapes the routes take: /introduction/ and /guides/otlp/.
+/:page/
+  Link: </:page/index.md>; rel="alternate"; type="text/markdown"
+
+/:section/:page/
+  Link: </:section/:page/index.md>; rel="alternate"; type="text/markdown"
