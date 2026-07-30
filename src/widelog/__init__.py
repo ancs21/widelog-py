@@ -17,12 +17,16 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 __all__ = [
     "REDACTED",
     "TRUNCATED",
+    "ErrorCatalog",
+    "ErrorFactory",
+    "ErrorSpec",
     "WideEvent",
     "WidelogError",
     "WidelogMiddleware",
@@ -90,6 +94,100 @@ class WidelogError(Exception):
             if getattr(self, key):
                 out[key] = getattr(self, key)
         return out
+
+
+# Everything a call site may override. What is left over is a message parameter.
+_OVERRIDES = frozenset({"message", "status", "why", "fix", "link", "internal", "cause"})
+
+
+@dataclass(frozen=True)
+class ErrorSpec:
+    """One error, declared once: the parts that are the same at every call site.
+
+    `message` is either a constant or a function whose parameters become required
+    keyword arguments when the error is raised.
+    """
+
+    message: str | Callable[..., str]
+    status: int = 500
+    why: str | None = None
+    fix: str | None = None
+    link: str | None = None
+    tags: tuple[str, ...] = ()
+    internal: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ErrorFactory:
+    """An ErrorSpec bound to a stable code. Call it to build the WidelogError.
+
+    ```python
+    fraud_detected = ErrorFactory("billing.FRAUD", ErrorSpec(status=403, message="Flagged"))
+    raise fraud_detected()
+    ```
+    """
+
+    code: str
+    spec: ErrorSpec
+
+    def __getattr__(self, name: str) -> Any:
+        # Read spec fields off the factory: PAYMENT_DECLINED.status, .fix, .tags
+        if name.startswith("_") or name == "spec":
+            raise AttributeError(name)
+        return getattr(self.spec, name)
+
+    def _render(self, params: dict[str, Any]) -> str:
+        if callable(self.spec.message):
+            return self.spec.message(**params)
+        if params:
+            raise TypeError(f"{self.code} takes no message params, got {sorted(params)}")
+        return self.spec.message
+
+    def __call__(self, **kwargs: Any) -> WidelogError:
+        overrides = {key: kwargs.pop(key) for key in list(kwargs) if key in _OVERRIDES}
+        spec = self.spec
+        internal = {**(spec.internal or {}), **(overrides.get("internal") or {})}
+        return WidelogError(
+            overrides.get("message") or self._render(kwargs),
+            code=self.code,
+            status=overrides.get("status", spec.status),
+            why=overrides.get("why", spec.why),
+            fix=overrides.get("fix", spec.fix),
+            link=overrides.get("link", spec.link),
+            cause=overrides.get("cause"),
+            internal=internal or None,
+        )
+
+
+class ErrorCatalog:
+    """A namespace of related errors that share one code prefix.
+
+    Each ErrorSpec in the body becomes a factory whose code is
+    `prefix.ATTRIBUTE_NAME`, so the code cannot drift from the name.
+
+    ```python
+    class BillingErrors(ErrorCatalog, prefix="billing"):
+        CART_EMPTY = ErrorSpec(status=400, message="Cart is empty")
+
+    raise BillingErrors.CART_EMPTY()          # code: billing.CART_EMPTY
+    ```
+    """
+
+    _prefix: ClassVar[str]
+
+    def __init_subclass__(cls, prefix: str, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if not prefix:
+            raise ValueError("an error catalog needs a prefix, so its codes stay unambiguous")
+        cls._prefix = prefix
+        for name, value in list(vars(cls).items()):
+            if isinstance(value, ErrorSpec):
+                setattr(cls, name, ErrorFactory(f"{prefix}.{name}", value))
+
+    @classmethod
+    def codes(cls) -> tuple[str, ...]:
+        """Every code in this catalog, in declaration order."""
+        return tuple(v.code for v in vars(cls).values() if isinstance(v, ErrorFactory))
 
 
 def _norm(key: str) -> str:

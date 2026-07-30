@@ -38,7 +38,7 @@ One JSON line goes out when the response does:
 
 ```json
 {
-  "timestamp": "2026-07-30T10:23:45Z",
+  "timestamp": "2026-07-30T10:23:45.612Z",
   "level": "info",
   "service": "checkout",
   "environment": "production",
@@ -106,6 +106,79 @@ async def on_widelog_error(request, exc):
 
 Without that handler the client gets a 500 and the event has no `error` field.
 
+## Declare your errors once
+
+Once a service has more than a handful of errors, writing `why` and `fix` at each `raise` means
+they drift. Declare them in a catalog instead. Each `ErrorSpec` becomes a factory whose code is
+`prefix.ATTRIBUTE_NAME`, so the code cannot fall out of step with the name.
+
+```python
+from widelog import ErrorCatalog, ErrorSpec
+
+
+class BillingErrors(ErrorCatalog, prefix="billing"):
+    CART_EMPTY = ErrorSpec(status=400, message="Cart is empty")
+    PAYMENT_DECLINED = ErrorSpec(
+        status=402,
+        message="Card declined",
+        why="Issuer declined the charge",
+        fix="Try a different payment method",
+        link="https://docs.example.com/errors/payment-declined",
+    )
+    INSUFFICIENT_FUNDS = ErrorSpec(
+        status=402,
+        message=lambda available, required: f"Insufficient funds: ${available} of ${required}",
+        fix="Add funds and retry",
+    )
+```
+
+Raising one reads as the name of the thing that went wrong:
+
+```python
+if not cart.items:
+    raise BillingErrors.CART_EMPTY()
+
+raise BillingErrors.INSUFFICIENT_FUNDS(available=balance, required=cart.total, cause=exc)
+```
+
+A `message` that is a function turns its parameters into required keyword arguments, so a
+templated error cannot be raised with a missing value. Any spec field can be overridden at the
+call site, and `internal` merges with the call site winning:
+
+```python
+raise BillingErrors.PAYMENT_DECLINED(
+    link="/support/payment-issues",       # overrides the spec
+    internal={"processor_ref": "ch_x"},   # merged, stays server-side
+    cause=stripe_error,
+)
+```
+
+Branch on the code without repeating the string anywhere:
+
+```python
+except WidelogError as exc:
+    if exc.code == BillingErrors.PAYMENT_DECLINED.code:
+        ...
+
+BillingErrors.CART_EMPTY.status   # 400
+BillingErrors.codes()             # ('billing.CART_EMPTY', 'billing.PAYMENT_DECLINED', ...)
+```
+
+For a single error with no group to join, bind a spec to a code directly:
+
+```python
+from widelog import ErrorFactory
+
+fraud_detected = ErrorFactory(
+    "billing.FRAUD_DETECTED",
+    ErrorSpec(status=403, message="Transaction flagged for review"),
+)
+```
+
+Coming from evlog: `ErrorCatalog` is `defineErrorCatalog`, `ErrorFactory` is `defineError`. A
+class body replaces the entry map because it is what gives Python editors autocomplete on
+`BillingErrors.` and lets a type checker see the attributes. A dict would type as `Any`.
+
 ## Log work that is not a request
 
 ```python
@@ -164,6 +237,9 @@ one that hits the timeout guard.
 | `log.set_level(level)` | Pin the level so later `error()` and `warn()` calls cannot raise it. |
 | `log.emit(**overrides)` | Emit and seal the event. Idempotent. |
 | `WidelogError(msg, code=, status=, why=, fix=, link=, internal=)` | Error with a status and an explanation. |
+| `ErrorSpec(message=, status=, why=, fix=, link=, tags=, internal=)` | One error declared once. `message` may be a function of required params. |
+| `ErrorCatalog` (subclass with `prefix=`) | Turns each `ErrorSpec` in the body into a factory coded `prefix.NAME`. `codes()` lists them. |
+| `ErrorFactory(code, spec)` | A spec bound to a code, for an error with no catalog. |
 | `WidelogMiddleware` | ASGI. Covers FastAPI, Starlette, Litestar, and Django-async. |
 | `lambda_wide_event` | Decorator for an AWS Lambda handler. |
 
