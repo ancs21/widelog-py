@@ -40,13 +40,16 @@ _current: contextvars.ContextVar[WideEvent | None] = contextvars.ContextVar("wid
 _config: dict[str, Any] = {
     "service": os.getenv("SERVICE_NAME", "app"),
     "environment": os.getenv("ENVIRONMENT", "development"),
-    "redact": {"password", "token", "secret", "authorization", "apikey", "cookie"},
+    # Normalized by init(), so emit() never has to re-normalize per event.
+    "redact": ("password", "token", "secret", "authorization", "apikey", "cookie"),
     "sink": None,  # callable(dict) -> None; default is NDJSON on stdout
 }
 
 
 def init(**config: Any) -> None:
     """Configure once at startup: service, environment, redact, sink."""
+    if "redact" in config:
+        config["redact"] = tuple(_norm(key) for key in config["redact"])
     _config.update(config)
 
 
@@ -167,28 +170,36 @@ class WideEvent:
     def debug(self, message: str, context: dict[str, Any] | None = None) -> None:
         self._mutate({"messages": [{"level": "debug", "message": message}], **(context or {})}, "debug")
 
-    def emit(self, **overrides: Any) -> dict[str, Any] | None:
-        """Emit the wide event. Seals the logger."""
-        # ponytail: unlocked flag check, so a Lambda timeout racing a normal return can
-        # duplicate one line. Cheaper than taking a lock on every emit.
-        if self._emitted:
-            return None
-        self._emitted = True
+    def _build(self, overrides: dict[str, Any]) -> dict[str, Any]:
         _merge(self.fields, overrides)
-        event = {
+        return {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
             "level": self._explicit_level or self.level,
             "service": _config["service"],
             "environment": _config["environment"],
             "duration_ms": round((time.perf_counter() - self._started) * 1000, 2),
-            **_redact(self.fields, {_norm(k) for k in _config["redact"]}),
+            **_redact(self.fields, _config["redact"]),
         }
-        sink = _config["sink"]
-        if sink:
-            sink(event)
-        else:
-            print(json.dumps(event, default=str), file=sys.stdout, flush=True)
-        return event
+
+    def emit(self, **overrides: Any) -> dict[str, Any] | None:
+        """Emit the wide event and seal the logger. Never raises."""
+        # ponytail: unlocked flag check, so a Lambda timeout racing a normal return can
+        # duplicate one line. Cheaper than taking a lock on every emit.
+        if self._emitted:
+            return None
+        self._emitted = True
+        try:
+            event = self._build(overrides)
+            sink = _config["sink"]
+            if sink:
+                sink(event)
+            else:
+                print(json.dumps(event, default=str), file=sys.stdout, flush=True)
+            return event
+        except Exception as exc:
+            # A broken sink must never fail the caller's request or replace its exception.
+            print(f"[widelog] dropped the event: {exc!r}", file=sys.stderr)
+            return None
 
 
 def _record_status(log: WideEvent, status: int) -> None:

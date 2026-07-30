@@ -10,6 +10,7 @@ from widelog import (
     WideEvent,
     WidelogError,
     WidelogMiddleware,
+    init,
     lambda_wide_event,
     use_logger,
     wide_event,
@@ -277,3 +278,47 @@ def test_emit_is_idempotent(seen):
     event = WideEvent()
     assert event.emit() is not None
     assert event.emit() is None
+
+
+# --- hardening: a logger must never be the reason a request fails ---
+
+
+def test_failing_sink_does_not_break_a_successful_request(seen, capsys):
+    def broken_sink(event):
+        raise RuntimeError("backend down")
+
+    init(sink=broken_sink)
+    with wide_event(path="/ok") as log:
+        log.set(ok=True)
+
+    assert "dropped the event" in capsys.readouterr().err
+
+
+def test_failing_sink_leaves_the_original_exception_alone(seen):
+    def broken_sink(event):
+        raise RuntimeError("backend down")
+
+    init(sink=broken_sink)
+    with pytest.raises(WidelogError) as caught, wide_event(path="/pay"):
+        raise WidelogError("Payment failed", status=402)
+
+    assert caught.value.status == 402
+
+
+def test_emit_returns_none_when_the_sink_fails(seen):
+    init(sink=lambda event: 1 / 0)
+    assert WideEvent().emit() is None
+
+
+def test_unserializable_field_does_not_break_the_request(seen, capsys):
+    class Circular:
+        pass
+
+    obj = Circular()
+    obj.self = obj  # json.dumps would recurse forever without default=str
+
+    init(sink=None)  # exercise the real stdout writer
+    with wide_event() as log:
+        log.set(obj=obj)
+
+    assert "Traceback" not in capsys.readouterr().err
