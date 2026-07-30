@@ -24,13 +24,11 @@ order created id=o_u_3
 order created id=o_u_1
 ```
 
-Which user's payment failed?
-
-Nothing in those twelve lines says. `payment failed` sits between `u_2` and `u_3`, and it is
-not next to either one for any reason except scheduling. You can work it out by elimination,
-since three checkouts produced two `order created` lines and `u_2` is the one missing, but that
-is reasoning from absence. It works here because there are three requests. At four hundred it
-stops working.
+Nothing in those twelve lines says which user's payment failed. `payment failed` sits between
+`u_2` and `u_3`, and it is not next to either one for any reason except scheduling. You can
+work it out by elimination, since three checkouts produced two `order created` lines and `u_2`
+is the one missing, but that is reasoning from absence. It works here because there are three
+requests. At four hundred it stops working.
 
 None of those lines is badly written, and every one of them carries a real fact. They were
 written separately, and the log has no way to put them back together.
@@ -45,7 +43,7 @@ The same three checkouts, logged as wide events:
 {"level":"info","service":"checkout","duration_ms":9.87,"op":"checkout","user":{"id":"u_1"},"cart":{"items":3},"payment":{"last4":"4242"},"order":{"id":"o_u_1"}}
 ```
 
-Twelve lines became three rows, and the question answers itself. `u_2` failed, the issuer
+Twelve lines became three rows, and the failed one names itself. `u_2` failed, the issuer
 declined it, the cart had three items, it took 3.27ms to find out, and whoever reads this at
 3am is told what to try next.
 
