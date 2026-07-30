@@ -15,8 +15,6 @@ from widelog.otlp import OTLPSink
 init(service="checkout", sink=OTLPSink(endpoint="http://localhost:4318"))
 ```
 
-That is the whole setup. Everything else on this page is what happens after it.
-
 `widelog.otlp` is a separate import. Bringing in `widelog` does not bring in this module, so a
 project writing to stdout pays nothing for it.
 
@@ -79,8 +77,8 @@ arrives at the collector as this:
 }
 ```
 
-Redaction runs before the sink does, so `api_token` was already `[REDACTED]` when the exporter
-saw it. Nothing about OTLP changes that.
+Redaction runs before any sink does, so `api_token` was already `[REDACTED]` by the time the
+exporter saw it.
 
 ## Scalars keep their type, nested values do not
 
@@ -91,15 +89,16 @@ otherwise arrive as `1`.
 Dictionaries and lists are carried as JSON text. `cart` became a string containing
 `{"items":3,"total":99.5}` rather than a nested structure.
 
-This is a real tradeoff and worth understanding before you build dashboards on it. The object
-reaches the backend with its shape intact and readable, and full text search still reaches
-inside it, so both `match_all('99.5')` and `str_match(cart, '99.5')` find that row. What text
-cannot do is arithmetic. `avg(cart_total)` has no column to average, because those numbers live
-inside a string rather than in fields of their own.
+That choice decides how you shape your fields. The object reaches the backend with its shape
+intact and readable, and full text search still reaches inside it, so both `match_all('99.5')`
+and `str_match(cart, '99.5')` find that row. What text cannot do is arithmetic. `avg(cart_total)`
+has no column to average, because those numbers live inside a string rather than in fields of
+their own.
 
 <Aside type="note" title="Put anything you aggregate at the top level">
   `log.set(cart={"total": 99.5})` is searchable. `log.set(cart_total=99.5)` is searchable and
-  averageable. Nesting is for context you read, top-level scalars are for numbers you chart.
+  averageable. Nest the context you expect to read, and keep a top-level scalar for every number
+  you expect to chart.
 </Aside>
 
 ## Severity
@@ -113,8 +112,8 @@ inside a string rather than in fields of their own.
 | `warn` | 13 | WARN |
 | `error` | 17 | ERROR |
 
-The gaps are in the specification rather than in widelog. OpenTelemetry gives every level four
-steps, such as `INFO2` and `INFO3`, and widelog only uses the unqualified one of each.
+The gaps come from the specification. OpenTelemetry gives every level four steps, such as
+`INFO2` and `INFO3`, and widelog only uses the unqualified one of each.
 
 ## The body
 
@@ -137,14 +136,14 @@ in the `error` attribute:
 ]
 ```
 
-## Trace ids are validated, not trusted
+## Trace ids are checked before they are used
 
 A `trace_id` field is promoted onto the record as `traceId` only when it is exactly 32
 hexadecimal characters. `span_id` needs exactly 16.
 
 Anything else stays an ordinary attribute. An X-Ray header and a hand-rolled correlation id are
-both useful and neither is a W3C trace id, and a collector would reject or silently drop them
-in that slot. Leaving them in attributes keeps them searchable instead.
+both useful identifiers, but a collector expects a W3C trace id in that slot and will reject or
+silently drop anything that is not one. Leaving them in attributes keeps them searchable.
 
 ## Sending
 
@@ -161,7 +160,8 @@ service's events under another's name.
 
 ## When the collector is down
 
-Nothing about a collector's bad day reaches the application.
+The exporter absorbs the failure and reports it on stderr, rather than surfacing it to the code
+being logged.
 
 - A send that fails prints to stderr and returns. It never raises into the request.
 - A rejection prints the collector's own response body, truncated, because that is where it
@@ -180,7 +180,7 @@ events pile up, hit the cap, and drop, without anything raising or reaching stde
 
 `OTLPSink` registers a fork handler, so each child gets a fresh worker and its own queue.
 Whatever was queued at the moment of the fork stays with the parent, which still has it and
-still sends it. No configuration is needed for this.
+still sends it. You do not have to configure any of this.
 
 ## Configuration
 
@@ -204,7 +204,7 @@ decoded, which is what Grafana's generated configuration needs. Constructing a s
 endpoint from either source raises immediately, rather than discarding events quietly.
 
 `flush()` blocks until everything queued has been sent, which is what you want in a test or a
-short lived script. `close()` flushes and stops the worker, and is registered to run at
+short-lived script. `close()` flushes and stops the worker, and is registered to run at
 interpreter exit.
 
 ## Converting without sending
