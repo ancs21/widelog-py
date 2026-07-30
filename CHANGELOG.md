@@ -6,6 +6,25 @@ All notable changes to widelog are recorded here. The format follows
 within the month. A version says when it shipped, not what it promises about
 compatibility, so read the notes below before upgrading.
 
+## [2026.7.1]
+
+### Changed
+
+- Redaction caches whether a key name is a secret, instead of re-deriving it on every event. A
+  field name's secret-ness never changes, but working it out meant lowercasing the key, stripping
+  separators, and testing six suffixes, for every field, every time: 61% of the cost of an event.
+  The redact set is part of the cache key, so changing it through `init()` still takes effect.
+- Stack extraction no longer reads each frame's source line off disk. Only the file, line number
+  and function name are recorded, so those lines were loaded and thrown away.
+
+Measured with `benchmarks/bench.py`, µs per event:
+
+| | 2026.7.0 | 2026.7.1 |
+| --- | --- | --- |
+| event with 8 fields | 9.70 | 6.33 |
+| event with a nested, partly redacted payload | 13.47 | 7.76 |
+| event carrying a 3-deep exception chain | 34.01 | 13.17 |
+
 ## [2026.7.0]
 
 First release.

@@ -9,10 +9,6 @@ widelog emits one structured event per operation instead of a line per step. Eac
 the context you attached during the operation, how long it took, and errors that say why they
 happened and what to do about them. It has no dependencies outside the standard library.
 
-widelog is a Python implementation of the wide-event approach from [evlog](https://evlog.dev).
-`contextvars` takes the place of `AsyncLocalStorage`, and one ASGI adapter covers what evlog
-handles with fifteen framework integrations.
-
 ## Install
 
 ```bash

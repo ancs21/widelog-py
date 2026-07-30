@@ -119,10 +119,6 @@ condition over one table.
 
 ## Lineage
 
-widelog is a Python implementation of the wide-event approach from
-[evlog](https://evlog.dev). `contextvars` takes the place of `AsyncLocalStorage`, and one ASGI
-adapter covers what evlog handles with fifteen framework integrations.
-
 <Aside type="note" title="Where the idea comes from">
   Wide events are not new. The argument for one row per operation over many lines per operation
   predates both libraries. evlog is what made the ergonomics concrete.

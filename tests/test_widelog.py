@@ -429,6 +429,27 @@ def test_custom_redact_set_is_normalized(seen):
     assert seen[0]["password"] == "not-in-the-custom-set"
 
 
+def test_one_key_follows_whichever_redact_set_is_current(seen):
+    """The secret-ness of a key name is cached; the needles are part of that key.
+
+    Without that, the first answer for "password" would outlive the config that
+    produced it and leak on the next init(), or redact a field nobody asked for.
+    """
+    with wide_event() as log:
+        log.set(password="SENSITIVE")
+    assert seen[0]["password"] == REDACTED
+
+    init(redact={"nothing-alike"})
+    with wide_event() as log:
+        log.set(password="now-an-ordinary-field")
+    assert seen[1]["password"] == "now-an-ordinary-field"
+
+    init(redact={"password"})
+    with wide_event() as log:
+        log.set(password="SENSITIVE")
+    assert seen[2]["password"] == REDACTED
+
+
 # --- hardening: the fields a backend sorts and charts on ---
 
 
