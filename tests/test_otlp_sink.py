@@ -19,9 +19,10 @@ from widelog.otlp import OTLPSink
 class Collector:
     """A stand-in OTLP collector that records what it was sent."""
 
-    def __init__(self, status: int = 200) -> None:
+    def __init__(self, status: int = 200, body: bytes = b"") -> None:
         self.requests: list[dict] = []
         self.status = status
+        self.body = body
         received = self.requests
         outer = self
 
@@ -36,7 +37,9 @@ class Collector:
                     }
                 )
                 self.send_response(outer.status)
+                self.send_header("content-length", str(len(outer.body)))
                 self.end_headers()
+                self.wfile.write(outer.body)
 
             def log_message(self, *args: object) -> None:
                 pass  # keep pytest output readable
@@ -185,6 +188,26 @@ def test_a_rejecting_collector_is_reported_not_raised(capsys):
         rejecting.close()
 
     assert "401" in capsys.readouterr().err
+
+
+def test_a_rejection_reports_what_the_collector_said(capsys):
+    """A status code alone sends you to curl to find out what was wrong with the
+    payload. Real case: OpenObserve answers 400 and the body names the field.
+    """
+    rejecting = Collector(
+        status=400,
+        body=b'{"code":400,"message":"Invalid json: invalid type: map, expected f64"}',
+    )
+    try:
+        sink = OTLPSink(endpoint=rejecting.endpoint)
+        sink({"timestamp": "2026-07-30T07:44:05.349Z", "level": "info", "service": "s"})
+        sink.close()
+    finally:
+        rejecting.close()
+
+    err = capsys.readouterr().err
+    assert "400" in err
+    assert "expected f64" in err
 
 
 def test_the_caller_is_never_blocked_by_a_full_queue(capsys):

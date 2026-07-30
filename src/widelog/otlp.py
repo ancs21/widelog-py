@@ -286,7 +286,17 @@ class OTLPSink:
             with urllib.request.urlopen(request, timeout=self.timeout):
                 pass
         except urllib.error.HTTPError as exc:
-            print(f"[widelog/otlp] collector rejected {len(batch)} event(s): {exc.code}", file=sys.stderr)
+            # The body is where a collector says which field it disliked. Without
+            # it a 400 is a scavenger hunt with curl. Truncated, since a rejection
+            # can echo the payload back.
+            try:
+                detail = exc.read()[:400].decode(errors="replace").strip()
+            except Exception:
+                detail = ""
+            print(
+                f"[widelog/otlp] collector rejected {len(batch)} event(s): {exc.code} {detail}".rstrip(),
+                file=sys.stderr,
+            )
         except Exception as exc:
             print(f"[widelog/otlp] dropped {len(batch)} event(s): {exc!r}", file=sys.stderr)
 
