@@ -10,7 +10,7 @@ Python port of the idea behind [evlog](https://evlog.dev) by
 ASGI adapter in place of evlog's fifteen framework integrations.
 
 ```bash
-pip install widelog-py
+uv add widelog-py
 ```
 
 ## The problem
@@ -126,6 +126,20 @@ is a no-op.
 
 No drain or `waitUntil` needed — on Lambda, stdout *is* CloudWatch Logs.
 
+## Examples
+
+Both are runnable and covered by `tests/test_examples.py`, so they can't rot.
+
+```bash
+uv run examples/aws_lambda_handler.py          # no AWS needed: authorized, declined, timed out
+uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
+```
+
+`examples/fastapi_app.py` also shows the one piece of wiring FastAPI needs: an
+`@app.exception_handler(WidelogError)` that calls `use_logger().error(exc)`. FastAPI converts
+the exception to a response *before* it reaches the middleware, so without that handler you
+get a 500 and the error never lands in the event.
+
 ## API
 
 | | |
@@ -154,6 +168,15 @@ Mutating a sealed event warns on stderr and drops the data, rather than losing i
 
 Sampling, batched drain to a backend, pretty dev terminal, audit hash-chaining, the CLI,
 SQS/SNS/EventBridge batch triggers, WSGI (Flask, Django-sync). Open an issue if you want one.
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check . && uv run ruff format .
+uv build
+```
 
 ## License
 

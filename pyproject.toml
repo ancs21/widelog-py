@@ -38,7 +38,13 @@ Homepage = "https://github.com/ancs21/widelog-py"
 Issues = "https://github.com/ancs21/widelog-py/issues"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  # examples/ are covered by tests/test_examples.py so they can't rot
+  "fastapi>=0.110",
+  "httpx>=0.27",
+]
 
 [tool.hatch.version]
 path = "src/widelog/__init__.py"
@@ -49,6 +55,7 @@ packages = ["src/widelog"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]  # so tests can import examples/
 
 [tool.ruff]
 line-length = 110
