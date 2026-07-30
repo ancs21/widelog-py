@@ -1,0 +1,135 @@
+---
+title: API
+description: Every exported function and class, the redaction rules, and the limits.
+sidebar:
+  order: 5
+  badge:
+    text: Reference
+    variant: info
+---
+
+Everything below is exported from `widelog`.
+
+## Configuration
+
+### `init(**config)`
+
+Call once at startup. Later calls update only the keys you pass.
+
+| Option | Type | Default | Notes |
+|---|---|---|---|
+| `service` | `str` | `$SERVICE_NAME` or `"app"` | Stamped on every event. |
+| `environment` | `str` | `$ENVIRONMENT` or `"development"` | Stamped on every event. |
+| `redact` | iterable of `str` | see [Redaction](#redaction) | Replaces the default name list. |
+| `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. |
+
+## Recording
+
+### `use_logger()`
+
+Returns the event for the current operation. Outside one, returns a standalone logger that emits
+on every call, so nothing is silently dropped.
+
+### `wide_event(**fields)`
+
+Context manager that scopes one event. Emits exactly once when the block exits, including when
+the block raises. An exception is attached to the event and then re-raised untouched.
+
+### `WideEvent`
+
+| Method | Notes |
+|---|---|
+| `set(dict)` or `set(**kw)` | Attach context. Dicts merge, lists concatenate, anything else overwrites. |
+| `info(msg, ctx=None)` | Record a message. Appends to `messages`. |
+| `warn(msg, ctx=None)` | Same, and raises the level to `warn`. |
+| `debug(msg, ctx=None)` | Same, at `debug`. |
+| `error(exc_or_str, ctx=None)` | Attach an error and raise the level to `error`. |
+| `set_level(level)` | Pin the level so later `error()` and `warn()` calls cannot raise it. |
+| `emit(**overrides)` | Emit and seal. Idempotent, and never raises. |
+
+The level of an event is the most severe thing recorded on it, unless `set_level()` pinned it.
+
+## Errors
+
+### `WidelogError(message, *, code=, status=, why=, fix=, link=, cause=, internal=)`
+
+`status` defaults to 500. `to_dict()` returns every field that is set except `internal`.
+
+### `ErrorSpec(message, *, status=, why=, fix=, link=, tags=, internal=)`
+
+One error declared once. `message` is a string, or a function whose parameters become required
+keyword arguments at the call site. `status` defaults to 500, `tags` never reaches the wire.
+
+### `ErrorCatalog`
+
+Subclass with `prefix=`. Every `ErrorSpec` in the body becomes a factory whose code is
+`prefix.ATTRIBUTE_NAME`. `codes()` returns them all in declaration order.
+
+### `ErrorFactory(code, spec)`
+
+A spec bound to a code, for an error with no catalog. Reads spec fields off the factory:
+`factory.status`, `factory.tags`.
+
+## Adapters
+
+### `WidelogMiddleware(app)`
+
+ASGI. Records `method`, `path`, `status`, and `duration_ms`. A 5xx raises the level to `error`.
+Non-HTTP scopes such as `lifespan` and `websocket` pass through untouched.
+
+### `lambda_wide_event(handler)`
+
+Decorator. Adds `request_id`, `cold_start`, `function`, `remaining_ms`, and `trace_id`, reads
+`method` and `path` from all three payload shapes, and emits early with `"timed_out": true`
+500ms before the deadline. See [AWS Lambda](/guides/aws-lambda).
+
+## Event shape
+
+Every event carries these, then your fields:
+
+| Field | Notes |
+|---|---|
+| `timestamp` | UTC, millisecond precision, so a backend can order same-second events. |
+| `level` | `debug`, `info`, `warn`, or `error`. |
+| `service`, `environment` | From `init()`. |
+| `duration_ms` | Absent on standalone one-off lines, which measure nothing. |
+
+## Redaction
+
+Keys ending in `password`, `token`, `secret`, `authorization`, `apikey`, or `cookie` are replaced
+with `[REDACTED]` at any depth, in dicts and inside lists.
+
+Matching ignores case, underscores, and hyphens, and looks at the end of the key:
+
+| Redacted | Not redacted |
+|---|---|
+| `password`, `user_password` | `tokens_used` |
+| `token`, `refresh_token`, `access_token` | `token_count` |
+| `api_key`, `x-api-key`, `apiKey` | `secretary` |
+| `cookie`, `set-cookie` | `cookies_accepted` |
+| `authorization`, `proxy-authorization` | |
+| `secret`, `client_secret` | |
+
+Suffix matching is why `refresh_token` is caught and `tokens_used` is not. Pass
+`init(redact={...})` to replace the list with your own names, which are normalized the same way.
+
+`WidelogError(internal=...)` is never serialized, into the event or into `to_dict()`.
+
+<Aside type="caution" title="Redaction is by key name">
+  A secret stored under a name that does not match, or inside an exception message, still reaches
+  the log. Redaction is a safety net for the usual spellings, not a guarantee.
+</Aside>
+
+## Limits
+
+Values are copied as they enter the event, so widelog never writes back into the dicts and lists
+you passed to `set()`. Nesting is kept to 32 levels, and anything deeper becomes `[TRUNCATED]`,
+which also makes a self-referential payload safe to log.
+
+## Failure
+
+`emit()` never raises. If the sink is down, or a field cannot be serialized, widelog reports the
+dropped event on stderr and returns `None`. Logging is not allowed to fail the request it is
+describing, or to replace the exception the application is already handling.
+
+Mutating a sealed event prints a warning to stderr and drops the data.

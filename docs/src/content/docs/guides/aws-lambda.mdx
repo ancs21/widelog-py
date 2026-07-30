@@ -1,0 +1,90 @@
+---
+title: AWS Lambda
+description: One event per invocation, including the invocations that time out.
+sidebar:
+  order: 4
+---
+
+```python
+from widelog import lambda_wide_event, use_logger
+
+
+@lambda_wide_event
+def handler(event, context):
+    use_logger().set(order={"id": "o_1"})
+    return {"statusCode": 200}
+```
+
+The decorator adds `request_id`, `cold_start`, `function`, `remaining_ms`, and the X-Ray
+`trace_id`. It reads `method` and `path` from Function URL, API Gateway v1, and API Gateway v2
+payloads, and records `statusCode` from what the handler returns.
+
+```json
+{
+  "timestamp": "2026-07-30T10:23:45.612Z",
+  "level": "info",
+  "service": "checkout",
+  "duration_ms": 812.4,
+  "method": "POST",
+  "path": "/checkout",
+  "status": 200,
+  "request_id": "req_1",
+  "cold_start": true,
+  "trace_id": "Root=1-abc;Parent=def;Sampled=1",
+  "function": { "name": "checkout-fn", "version": "$LATEST", "memory_mb": 512 },
+  "remaining_ms": 29187,
+  "order": { "id": "o_1" }
+}
+```
+
+## No drain needed
+
+On Lambda, stdout is CloudWatch Logs. The default sink already goes there, so there is no
+batching to configure, no `waitUntil` callback to pass, and no extension to install.
+
+## The timeout guard
+
+500ms before the invocation deadline, widelog emits the event with `"timed_out": true`.
+
+This matters because Lambda kills the process at the deadline. Without the guard, the one
+invocation you most want a record of is the only one that leaves none. `emit()` is idempotent,
+so if the handler does return afterwards, nothing is written twice.
+
+```json
+{ "level": "error", "timed_out": true, "request_id": "req_1", "cold_start": false }
+```
+
+<Aside type="note" title="Fields set after the guard fires">
+  Once the event is emitted it is sealed. A `set()` after that prints a warning to stderr and
+  drops the data, so you can see the loss instead of wondering where a field went.
+</Aside>
+
+## Cold starts
+
+`cold_start` is `true` on the first invocation in a container and absent afterwards, which makes
+"how much of our p99 is cold starts" a filter rather than a research project.
+
+## Errors
+
+There is no framework to convert an exception into a response, so decide what the caller should
+see. Catching and returning gives API Gateway a real status:
+
+```python
+try:
+    order_id = charge(card)
+except WidelogError as exc:
+    log.error(exc)
+    return {"statusCode": exc.status, "body": json.dumps(exc.to_dict())}
+```
+
+Letting it raise instead marks the invocation failed, which is what you want when the trigger
+should retry. The event is emitted either way.
+
+## Try it without an AWS account
+
+The repository ships a runnable example that fakes the context object and prints three events:
+one authorized, one declined, and one that hits the timeout guard.
+
+```sh
+uv run examples/aws_lambda_handler.py
+```

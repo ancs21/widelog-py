@@ -1,0 +1,103 @@
+---
+title: Requests
+description: One event per HTTP request with the ASGI middleware, and how fields reach it from anywhere in the call stack.
+sidebar:
+  order: 2
+---
+
+`WidelogMiddleware` is a plain ASGI middleware, so it works with FastAPI, Starlette, Litestar,
+and Django's async stack.
+
+```python
+from widelog import WidelogMiddleware, init, use_logger
+
+init(service="checkout")
+app.add_middleware(WidelogMiddleware)
+
+
+@app.post("/api/checkout")
+async def checkout():
+    log = use_logger()
+    log.set(user={"id": user.id, "plan": "premium"})
+    log.set(cart={"items": 3, "total": 9999})
+    return {"ok": True}
+```
+
+The middleware opens the event before your handler runs and emits it when the response starts,
+recording `method`, `path`, `status`, and `duration_ms` without being told. A 5xx response also
+raises the event's level to `error`.
+
+## Fields merge
+
+```python
+log.set(user={"id": "u_123"})
+log.set(user={"plan": "premium"})   # user now has both keys
+```
+
+Dictionaries merge key by key at any depth. Lists concatenate. Everything else overwrites. The
+values are copied on the way in, so widelog never writes back into the objects you passed it.
+
+## No logger to pass around
+
+`use_logger()` reads a `contextvars` slot, so any function in the call stack writes to the same
+event without taking a logger argument:
+
+```python
+async def charge(cart):
+    use_logger().set(payment={"method": "card"})
+```
+
+This is ambient context rather than dependency injection, and the choice is deliberate.
+FastAPI's `Depends` resolves only in a handler signature, so injecting the logger would mean
+threading `log` through every helper that wants to add a field.
+
+<Aside type="tip" title="If you want it in the signature anyway">
+  Wrap it. You get the same object, and the middleware still owns the lifecycle.
+
+  ```python
+  Log = Annotated[WideEvent, Depends(use_logger)]
+
+  @app.post("/api/checkout")
+  async def checkout(log: Log): ...
+  ```
+</Aside>
+
+## Concurrency
+
+Each request runs in its own task, and a task copies the context it was created from, so two
+requests in flight never share an event. Nothing is keyed on a thread or a request id.
+
+```python
+await asyncio.gather(checkout(a), checkout(b))   # two events, no crosstalk
+```
+
+## Work that is not a request
+
+Anything with a beginning and an end is an operation. Use `wide_event()` directly for jobs,
+consumers, and scripts:
+
+```python
+from widelog import wide_event
+
+with wide_event(job="nightly-reconcile") as log:
+    log.set(rows=len(rows))
+```
+
+The event is emitted when the block exits, including when it raises.
+
+Outside any operation, `use_logger()` returns a standalone logger that emits on every call, so
+a stray `use_logger().info(...)` in library code is never silently dropped. Those one-off lines
+carry no `duration_ms`, because they measure nothing.
+
+## Sending events somewhere
+
+The default sink writes NDJSON to stdout. Point `sink` at anything callable to send events on:
+
+```python
+init(service="checkout", sink=my_backend.send)
+```
+
+<Aside type="caution" title="A sink cannot fail your request">
+  `emit()` never raises. If your sink is down, widelog reports the dropped event on stderr and
+  returns `None`, rather than replacing the exception your application is already handling.
+</Aside>

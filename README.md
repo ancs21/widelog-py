@@ -287,6 +287,18 @@ uv run ruff check . && uv run ruff format .
 uv build
 ```
 
+The docs site under `docs/` is an Astro project built with
+[Nimbus](https://nimbus-docs.com). It is a separate toolchain from the package, which has no
+Node dependency at all.
+
+```bash
+cd docs
+bun install
+bun run dev          # http://localhost:4321
+bun run lint:docs    # frontmatter shape and internal links
+bun run build
+```
+
 ## License
 
 MIT, An Pham. The wide-event design comes from [evlog](https://github.com/HugoRCD/evlog)

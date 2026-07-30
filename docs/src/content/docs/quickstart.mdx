@@ -1,0 +1,89 @@
+---
+title: Quickstart
+description: From an empty project to one wide event on stdout.
+sidebar:
+  order: 1
+  badge: Start here
+---
+
+The shortest path from nothing to one event you can read.
+
+<Steps>
+  <Step title="Install">
+    ```sh
+    bun add widelog-py     # or: uv add widelog-py
+    ```
+
+    The distribution is `widelog-py`. The import is `widelog`.
+  </Step>
+
+  <Step title="Log one operation">
+    Save this as `hello.py`. No framework, no server.
+
+    ```python title="hello.py"
+    from widelog import init, use_logger, wide_event
+
+    init(service="checkout")
+
+    with wide_event(job="hello") as log:
+        log.set(user={"id": "u_123", "plan": "premium"})
+        log.set(cart={"items": 3, "total": 9999})
+        log.warn("coupon expired")
+    ```
+  </Step>
+
+  <Step title="Run it">
+    ```sh
+    python hello.py
+    ```
+
+    One line of NDJSON on stdout, with everything the block collected:
+
+    ```json
+    {
+      "timestamp": "2026-07-30T10:23:45.612Z",
+      "level": "warn",
+      "service": "checkout",
+      "environment": "development",
+      "duration_ms": 0.14,
+      "job": "hello",
+      "user": { "id": "u_123", "plan": "premium" },
+      "cart": { "items": 3, "total": 9999 },
+      "messages": [{ "level": "warn", "message": "coupon expired" }]
+    }
+    ```
+
+    The level is `warn` because that was the most severe thing recorded. Nothing called
+    `emit()`: the event was written when the block exited.
+  </Step>
+</Steps>
+
+## What just happened
+
+`wide_event()` opened one event and put it in a `contextvars` slot. `log.set()` merged fields
+into it. When the block exited, widelog stamped the duration, redacted anything that looked like
+a secret, and wrote a single JSON line.
+
+An exception would not have changed that. The event is still emitted, with the error attached
+and the level raised to `error`, and the exception continues to propagate.
+
+## Next
+
+<CardGrid>
+  <Card title="Log HTTP requests" icon="ph:globe">
+    Add the ASGI middleware and get one event per request, with method, path, and status.
+    [Requests](/guides/requests)
+  </Card>
+  <Card title="Declare your errors" icon="ph:warning-circle">
+    Give every error a stable code, a `why`, and a `fix`, in one place.
+    [Errors](/guides/errors)
+  </Card>
+  <Card title="Run on Lambda" icon="ph:cloud">
+    One event per invocation, including the ones that time out.
+    [AWS Lambda](/guides/aws-lambda)
+  </Card>
+  <Card title="Look something up" icon="ph:list-magnifying-glass">
+    Every function, the redaction rules, and the limits.
+    [Reference](/reference/api)
+  </Card>
+</CardGrid>

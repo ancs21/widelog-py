@@ -1,0 +1,86 @@
+---
+title: Introduction
+description: What a wide event is, and why one per operation beats a line per step.
+sidebar:
+  order: 0
+---
+
+widelog emits one structured event per operation instead of a line per step. Every field you
+attach during a request lands in the same JSON object, alongside how long the operation took and
+any error that ended it. It has no dependencies outside the standard library.
+
+## The shape of the problem
+
+A single request usually leaves a trail like this:
+
+```python
+print("Request received")
+print(f"User: {user.id}")
+print("Cart loaded")
+print("Payment failed")
+raise Exception("Something went wrong")
+```
+
+Five lines, interleaved with every other concurrent request, and none of them knows about the
+others. To answer "what else was true when this failed?" you have to reconstruct the request by
+correlating timestamps.
+
+## One event instead
+
+```python
+log = use_logger()
+log.set(user={"id": user.id, "plan": "premium"})
+log.set(cart={"items": 3, "total": 9999})
+```
+
+```json
+{
+  "timestamp": "2026-07-30T10:23:45.612Z",
+  "level": "error",
+  "service": "checkout",
+  "duration_ms": 1204.7,
+  "method": "POST",
+  "path": "/api/checkout",
+  "status": 402,
+  "user": { "id": "u_123", "plan": "premium" },
+  "cart": { "items": 3, "total": 9999 },
+  "error": {
+    "message": "Payment failed",
+    "code": "billing.PAYMENT_DECLINED",
+    "why": "Issuer declined the charge",
+    "fix": "Try a different payment method"
+  }
+}
+```
+
+One row per operation, with every field on it. Querying becomes filtering rather than
+correlating: `status = 402 and user.plan = "premium"` is a single condition over one table.
+
+## What you get
+
+<CardGrid>
+  <Card title="Ambient context" icon="ph:tree-structure">
+    `use_logger()` reads a `contextvars` slot, so a helper five frames deep adds fields without
+    being handed a logger.
+  </Card>
+  <Card title="Errors that explain themselves" icon="ph:first-aid-kit">
+    `why` says what went wrong, `fix` says what to do next. Declare them once in a catalog.
+  </Card>
+  <Card title="One adapter per runtime" icon="ph:plug">
+    ASGI covers FastAPI, Starlette, Litestar, and Django-async. A decorator covers AWS Lambda.
+  </Card>
+  <Card title="Secrets stay out" icon="ph:eye-slash">
+    Key names ending in `token`, `password`, `secret`, and friends are redacted at any depth.
+  </Card>
+</CardGrid>
+
+## Lineage
+
+widelog is a Python implementation of the wide-event approach from
+[evlog](https://evlog.dev). `contextvars` takes the place of `AsyncLocalStorage`, and one ASGI
+adapter covers what evlog handles with fifteen framework integrations.
+
+<Aside type="note" title="Where the idea comes from">
+  Wide events are not new. The argument for one row per operation over many lines per operation
+  predates both libraries. evlog is what made the ergonomics concrete.
+</Aside>

@@ -1,0 +1,131 @@
+---
+title: Errors
+description: Errors that carry a status, a why, and a fix, declared once in a catalog instead of at every raise site.
+sidebar:
+  order: 3
+---
+
+`WidelogError` carries an HTTP status and a machine-readable code, plus two fields written for
+whoever reads the log later: `why` says what went wrong, `fix` says what to do about it.
+
+```python
+from widelog import WidelogError
+
+raise WidelogError(
+    "Payment failed",
+    code="CARD_DECLINED",
+    status=402,
+    why="Issuer declined the charge",
+    fix="Try a different payment method or contact your bank",
+    internal={"processor_ref": "ch_live_x9"},
+)
+```
+
+`to_dict()` returns every field except `internal`, so you can put the error straight on the
+wire. `internal` never leaves the process: not in the response, not in the event.
+
+## Wiring it into FastAPI
+
+FastAPI converts the exception into a response before the middleware sees it, so the middleware
+only observes the status. Record the error in an exception handler:
+
+```python
+@app.exception_handler(WidelogError)
+async def on_widelog_error(request, exc):
+    use_logger().error(exc)
+    return JSONResponse(status_code=exc.status, content=exc.to_dict())
+```
+
+<Aside type="caution" title="Without the handler">
+  The client gets a 500 and the event has no `error` field. This is the one piece of wiring
+  FastAPI needs.
+</Aside>
+
+## Declare errors once
+
+Writing `why` and `fix` at every `raise` means they drift. A catalog declares each error once,
+and derives its code from the attribute name so the two cannot fall out of step.
+
+```python
+from widelog import ErrorCatalog, ErrorSpec
+
+
+class BillingErrors(ErrorCatalog, prefix="billing"):
+    CART_EMPTY = ErrorSpec(status=400, message="Cart is empty")
+    PAYMENT_DECLINED = ErrorSpec(
+        status=402,
+        message="Card declined",
+        why="Issuer declined the charge",
+        fix="Try a different payment method",
+        link="https://docs.example.com/errors/payment-declined",
+    )
+    INSUFFICIENT_FUNDS = ErrorSpec(
+        status=402,
+        message=lambda available, required: f"Insufficient funds: ${available} of ${required}",
+        fix="Add funds and retry",
+    )
+```
+
+Raising one reads as the name of the thing that went wrong:
+
+```python
+if not cart.items:
+    raise BillingErrors.CART_EMPTY()          # code: billing.CART_EMPTY
+```
+
+### Templated messages
+
+A `message` that is a function turns its parameters into required keyword arguments, so a
+templated error cannot be raised with a value missing:
+
+```python
+raise BillingErrors.INSUFFICIENT_FUNDS(available=balance, required=cart.total, cause=exc)
+```
+
+Misspell one and you get a `TypeError` at the call site rather than a message with a hole in it.
+
+### Overrides
+
+Any spec field can be overridden per call. `internal` merges, with the call site winning:
+
+```python
+raise BillingErrors.PAYMENT_DECLINED(
+    link="/support/payment-issues",
+    internal={"processor_ref": "ch_x"},
+    cause=stripe_error,
+)
+```
+
+### Branching without repeating the string
+
+```python
+except WidelogError as exc:
+    if exc.code == BillingErrors.PAYMENT_DECLINED.code:
+        ...
+
+BillingErrors.CART_EMPTY.status   # 400
+BillingErrors.codes()             # ('billing.CART_EMPTY', 'billing.PAYMENT_DECLINED', ...)
+```
+
+Rename the attribute and every code moves with it, because the code was never written out by
+hand.
+
+### A single error
+
+For one error with no group to join, bind a spec to a code directly:
+
+```python
+from widelog import ErrorFactory
+
+fraud_detected = ErrorFactory(
+    "billing.FRAUD_DETECTED",
+    ErrorSpec(status=403, message="Transaction flagged for review"),
+)
+```
+
+<Aside type="note" title="Coming from evlog">
+  `ErrorCatalog` is `defineErrorCatalog` and `ErrorFactory` is `defineError`. evlog gets its
+  autocomplete from template literal types and `declare module`, which Python cannot express, so
+  the entry map becomes a class body. Editors complete on `BillingErrors.` and a type checker
+  sees the attributes, where a dict of specs would type as `Any`.
+</Aside>

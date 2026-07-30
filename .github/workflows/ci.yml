@@ -21,3 +21,19 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+        working-directory: docs
+      - run: bun run typecheck
+        working-directory: docs
+      - run: bun run build
+        working-directory: docs
+      # after build, so .nimbus/routes.json exists and the internal-link rule
+      # actually runs instead of skipping itself
+      - run: bun run lint:docs
+        working-directory: docs
