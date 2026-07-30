@@ -6,6 +6,22 @@ All notable changes to widelog are recorded here. The format follows
 within the month. A version says when it shipped, not what it promises about
 compatibility, so read the notes below before upgrading.
 
+## [2026.7.2]
+
+### Fixed
+
+- A dict keyed by anything other than a string no longer costs you the event. Redaction asked
+  every key whether it ended in a secret name, which meant calling `.lower()` on it, so
+  `log.set(status_counts={200: 981, 404: 12})` raised inside `emit()`, and `emit()` dropped the
+  whole event rather than fail the request describing it. One integer key took the operation's
+  entire record with it. JSON allows `str`, `int`, `float`, `bool` and `None` keys, and now so
+  does widelog. Keys that JSON cannot represent at all, such as a tuple, still drop the event on
+  stderr as before.
+
+### Changed
+
+- The author email matches the address the commits and project URLs use.
+
 ## [2026.7.1]
 
 ### Changed

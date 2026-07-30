@@ -429,6 +429,40 @@ def test_custom_redact_set_is_normalized(seen):
     assert seen[0]["password"] == "not-in-the-custom-set"
 
 
+def test_a_dict_keyed_by_status_code_still_emits(seen):
+    """Redaction asked every key whether it ended in a secret name, which meant
+    calling .lower() on it. An int key raised, emit() swallowed it, and the whole
+    operation's event was lost over a field JSON serializes fine.
+    """
+    with wide_event(op="batch") as log:
+        log.set(status_counts={200: 981, 404: 12}, rows=996)
+
+    assert len(seen) == 1, "the event was dropped"
+    assert seen[0]["status_counts"] == {200: 981, 404: 12}
+    assert seen[0]["rows"] == 996
+
+
+@pytest.mark.parametrize("key", [200, 3.5, True, None])
+def test_every_key_type_json_allows_is_loggable(seen, key):
+    """json.dumps accepts str, int, float, bool and None as keys. So must we."""
+    with wide_event() as log:
+        log.set(counts={key: 1})
+
+    assert len(seen) == 1
+    assert seen[0]["counts"] == {key: 1}
+
+
+def test_a_non_string_key_is_never_treated_as_a_secret(seen):
+    """Guarding the key type must not become a way to smuggle a secret past
+    redaction: string keys around it still redact.
+    """
+    with wide_event() as log:
+        log.set(mixed={200: "ok", "api_token": "SENSITIVE"})
+
+    assert seen[0]["mixed"][200] == "ok"
+    assert seen[0]["mixed"]["api_token"] == REDACTED
+
+
 def test_one_key_follows_whichever_redact_set_is_current(seen):
     """The secret-ness of a key name is cached; the needles are part of that key.
 

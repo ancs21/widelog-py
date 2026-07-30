@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 # CalVer, YYYY.M.MICRO. Unpadded, so PEP 440 normalization leaves it alone.
-__version__ = "2026.7.1"
+__version__ = "2026.7.2"
 
 REDACTED = "[REDACTED]"
 TRUNCATED = "[TRUNCATED]"
@@ -245,8 +245,12 @@ def _is_secret(key: str, needles: tuple[str, ...]) -> bool:
 
 def _redact(value: Any, needles: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
+        # JSON allows int, float, bool and None keys, and only a str can end in a
+        # secret name. Screening here rather than inside _is_secret also keeps those
+        # keys out of its cache, so a dict keyed by id cannot evict the field names
+        # that repeat and earn the cache its keep.
         return {
-            key: REDACTED if _is_secret(key, needles) else _redact(item, needles)
+            key: REDACTED if isinstance(key, str) and _is_secret(key, needles) else _redact(item, needles)
             for key, item in value.items()
         }
     if isinstance(value, list):
