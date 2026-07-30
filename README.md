@@ -219,12 +219,20 @@ drain or a `waitUntil` callback.
 
 ```bash
 uv run examples/aws_lambda_handler.py
+uv run --with fastapi --with httpx examples/microservices.py
 uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
 ```
 
 The Lambda example needs no AWS account. It prints three events: one authorized, one declined,
-and one that hits the timeout guard. Both examples are covered by `tests/test_examples.py`, so
-they cannot drift out of date without CI noticing.
+and one that hits the timeout guard.
+
+The microservices example runs a gateway and a downstream service in one process and calls one
+through the other. Each emits its own event, and both carry the same `trace_id`, so a backend
+joins them on one field. The gateway also records what the downstream call cost and what it
+returned, which is what makes a slow request attributable to a service.
+
+All three are covered by `tests/test_examples.py`, so they cannot drift out of date without CI
+noticing.
 
 ## API
 

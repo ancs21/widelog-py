@@ -69,6 +69,50 @@ def test_fastapi_example_authorizes(seen):
     assert event["order"] == {"id": "o_1"}
 
 
+def _checkout(sku: str) -> tuple[int, dict]:
+    from examples.microservices import gateway  # imported late: init() runs at import
+
+    async def main() -> tuple[int, dict]:
+        transport = httpx.ASGITransport(app=gateway)
+        async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
+            response = await client.post("/checkout", json={"user_id": "u_123", "sku": sku})
+            return response.status_code, response.json()
+
+    return asyncio.run(main())
+
+
+def test_microservices_example_shares_one_trace_across_both_services(seen):
+    status, body = _checkout("WIDGET-1")
+
+    assert status == 200 and body == {"order_id": "o_1"}
+    downstream, edge = seen
+    assert [downstream["service"], edge["service"]] == ["orders", "gateway"]
+
+    # The point of the example: one field joins the two events.
+    assert downstream["trace_id"] == edge["trace_id"]
+    assert edge["downstream"]["service"] == "orders"
+    assert edge["downstream"]["status"] == 200
+
+
+def test_microservices_example_carries_the_downstream_reason_to_the_edge(seen):
+    status, body = _checkout("SOLD-OUT")
+
+    assert status == 409
+    assert body["why"].startswith("The last unit")
+
+    downstream, edge = seen
+    assert downstream["level"] == "error" and edge["level"] == "error"
+    assert downstream["trace_id"] == edge["trace_id"]
+    assert downstream["error"]["code"] == edge["error"]["code"] == "OUT_OF_STOCK"
+    assert edge["downstream"]["status"] == 409
+
+    # internal= is scoped to the service that raised. It must not reach that
+    # service's own event, the caller's event, or the client.
+    assert "syd-3" not in str(downstream)
+    assert "syd-3" not in str(edge)
+    assert "syd-3" not in json.dumps(body)
+
+
 def test_fastapi_example_declines_with_why_and_fix(seen):
     status, body = _call(DECLINE_CARD)
 
