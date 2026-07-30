@@ -178,8 +178,7 @@ fraud_detected = ErrorFactory(
 )
 ```
 
-Coming from evlog: `ErrorCatalog` is `defineErrorCatalog`, `ErrorFactory` is `defineError`. A
-class body replaces the entry map because it is what gives Python editors autocomplete on
+A class body rather than a dict of specs, because that is what gives editors autocomplete on
 `BillingErrors.` and lets a type checker see the attributes. A dict would type as `Any`.
 
 ## Log work that is not a request
@@ -312,5 +311,4 @@ bun run build
 
 ## License
 
-MIT, An Pham. The wide-event design comes from [evlog](https://github.com/HugoRCD/evlog)
-(MIT, HugoRCD). This is an independent Python implementation of it.
+MIT, An Pham.

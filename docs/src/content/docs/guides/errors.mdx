@@ -122,10 +122,3 @@ fraud_detected = ErrorFactory(
     ErrorSpec(status=403, message="Transaction flagged for review"),
 )
 ```
-
-<Aside type="note" title="Coming from evlog">
-  `ErrorCatalog` is `defineErrorCatalog` and `ErrorFactory` is `defineError`. evlog gets its
-  autocomplete from template literal types and `declare module`, which Python cannot express, so
-  the entry map becomes a class body. Editors complete on `BillingErrors.` and a type checker
-  sees the attributes, where a dict of specs would type as `Any`.
-</Aside>

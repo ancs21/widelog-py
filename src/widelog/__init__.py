@@ -1,8 +1,8 @@
 """widelog: one wide event per operation, instead of a line per step.
 
-Wide-event logging for Python, inspired by evlog (https://evlog.dev).
-`contextvars` replaces AsyncLocalStorage; one ASGI adapter replaces evlog's
-per-framework integrations.
+Wide-event logging for Python. `use_logger()` reads a contextvars slot, so any
+function in the call stack adds fields to the operation's event, and one ASGI
+adapter covers every ASGI framework.
 """
 
 from __future__ import annotations
