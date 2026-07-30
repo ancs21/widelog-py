@@ -1,0 +1,199 @@
+---
+title: FastAPI
+description: "A complete FastAPI integration: middleware order, the exception handler, background tasks, streaming, and testing."
+sidebar:
+  order: 2
+---
+
+Everything on this page was measured against a running FastAPI app, not inferred from how the
+middleware looks.
+
+## Set it up
+
+<Steps>
+  <Step title="Install">
+    <Tabs>
+      <TabItem label="uv">
+        ```sh
+        uv add widelog-py
+        ```
+      </TabItem>
+      <TabItem label="pip">
+        ```sh
+        pip install widelog-py
+        ```
+      </TabItem>
+    </Tabs>
+  </Step>
+
+  <Step title="Add the middleware and the error handler">
+    ```python title="main.py"
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from widelog import WidelogError, WidelogMiddleware, init, use_logger
+
+    init(service="checkout", environment="production")
+
+    app = FastAPI()
+    app.add_middleware(WidelogMiddleware)
+
+
+    @app.exception_handler(WidelogError)
+    async def on_widelog_error(request: Request, exc: WidelogError) -> JSONResponse:
+        use_logger().error(exc)
+        return JSONResponse(status_code=exc.status, content=exc.to_dict())
+    ```
+
+    The handler is not optional. FastAPI turns the exception into a response before the
+    middleware sees it, so without this the client gets a 500 and the event has no `error`
+    field.
+  </Step>
+
+  <Step title="Attach fields in a route">
+    ```python
+    @app.post("/api/checkout")
+    async def checkout(body: CheckoutBody):
+        log = use_logger()
+        log.set(user={"id": body.user_id})
+        log.set(cart=await load_cart(body.user_id))
+        return {"order_id": await charge(body.card)}
+    ```
+  </Step>
+</Steps>
+
+## Middleware order changes what you measure
+
+Starlette's `add_middleware` prepends, so the middleware you add **last** ends up outermost.
+That decides whether `duration_ms` includes the work other middleware does.
+
+```python
+app.add_middleware(WidelogMiddleware)   # added first, runs inner
+app.add_middleware(SomeSlowMiddleware)  # added last, runs outer
+```
+
+With a middleware that sleeps 200ms, the measured event was:
+
+| Order | `duration_ms` |
+|---|---|
+| widelog added first (inner) | 1 |
+| widelog added last (outer) | 201 |
+
+Add widelog **last** if you want the number to reflect what the client waited for. Add it first
+if you only want your own handler's time.
+
+<Aside type="tip" title="Rule of thumb">
+  Add `WidelogMiddleware` after every other middleware, so the event covers compression, CORS,
+  sessions, and anything else in the stack.
+</Aside>
+
+## Background tasks land in the same event
+
+A `BackgroundTasks` callback runs inside the response cycle, before the ASGI call returns, so the
+event is still open and `use_logger()` still resolves to it:
+
+```python
+def after_response(order_id: str) -> None:
+    use_logger().set(receipt={"sent_for": order_id})
+
+
+@app.post("/checkout")
+async def checkout(tasks: BackgroundTasks):
+    use_logger().set(order={"id": "o_1"})
+    tasks.add_task(after_response, "o_1")
+    return {"ok": True}
+```
+
+Both fields arrive on one event:
+
+```json
+{ "order": { "id": "o_1" }, "receipt": { "sent_for": "o_1" } }
+```
+
+Work you hand to something outside the response cycle is different. A task on your own event loop
+or a thread that outlives the request will find the event sealed, print a warning to stderr, and
+drop the fields. Give that work its own `wide_event()`.
+
+## Streaming responses are timed to the last byte
+
+`duration_ms` covers the whole stream, not the time to first byte, because the event is emitted
+when the ASGI call finishes rather than when the response starts:
+
+```python
+@app.get("/export")
+async def export():
+    use_logger().set(streaming=True)
+    return StreamingResponse(rows(), media_type="text/csv")
+```
+
+A response that took 300ms to stream three chunks reported `duration_ms: 303.33`, against 304ms
+of wall clock in the client. The `status` still comes from the response start, so you get both
+the real status and the real total duration.
+
+## Unhandled exceptions
+
+An exception with no handler still produces a complete event before it propagates to FastAPI's
+500 machinery:
+
+```json
+{ "level": "error", "error": { "type": "RuntimeError" }, "step": "charge" }
+```
+
+The fields you set before the failure survive, and the exception continues unchanged. Note that
+`status` is absent: the response never started, so there was no status to record. Filter on
+`level = "error"` rather than on `status >= 500` if you want to catch these.
+
+## WebSockets and lifespan pass through
+
+The middleware only handles `scope["type"] == "http"`. WebSocket connections and lifespan
+startup are forwarded untouched and produce no event. Wrap a WebSocket handler in
+`wide_event()` yourself if you want one per connection or per message.
+
+## Testing
+
+Point the sink at a list and assert on the event the request produced:
+
+```python title="test_checkout.py"
+import httpx
+import pytest
+from widelog import init
+
+from main import app
+
+
+@pytest.fixture
+def events():
+    captured = []
+    init(sink=captured.append)
+    return captured
+
+
+def test_declined_card_is_logged(events):
+    async def call():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/api/checkout", json={"user_id": "u_1", "card": "4000..."})
+
+    response = asyncio.run(call())
+
+    assert response.status_code == 402
+    (event,) = events
+    assert event["level"] == "error"
+    assert event["error"]["code"] == "billing.PAYMENT_DECLINED"
+```
+
+`httpx.ASGITransport` drives the app in-process, so the middleware and the `contextvars` slot
+behave exactly as they do under uvicorn.
+
+## A complete example
+
+The repository ships a runnable FastAPI app covering the middleware, the exception handler, a
+catalog error, and redaction:
+
+```sh
+uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
+```
+
+```sh
+curl -sX POST localhost:8000/checkout -H 'content-type: application/json' \
+  -d '{"user_id": "u_123", "card": "4000000000000002", "token": "idem_abc"}'
+```
