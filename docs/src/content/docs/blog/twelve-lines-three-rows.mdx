@@ -1,0 +1,143 @@
+---
+title: Twelve lines, three rows
+description: What a wide event tells you that a line per step cannot, shown with the output of three concurrent checkouts.
+audience: human
+sidebar:
+  order: 7
+---
+
+Three users check out at the same time. One payment fails. Here is what a line per step
+leaves in your log:
+
+```text
+checkout started user_id=u_1
+checkout started user_id=u_2
+checkout started user_id=u_3
+cart loaded user_id=u_2 items=3
+cart loaded user_id=u_3 items=3
+charging card last4=4242
+cart loaded user_id=u_1 items=3
+payment failed
+charging card last4=4242
+charging card last4=4242
+order created id=o_u_3
+order created id=o_u_1
+```
+
+Read it again and answer one question: whose payment failed?
+
+Nothing in those twelve lines says. `payment failed` sits between `u_2` and `u_3`, and it is
+not adjacent to either for any reason other than scheduling. You can work it out by
+elimination, because three checkouts produced two `order created` lines and `u_2` is the one
+missing, but that is reasoning from absence. It works here because there are three requests.
+It does not work at four hundred.
+
+The lines are not badly written. Every one of them carries a real fact. The problem is that
+the facts were separated at birth and the log has no way to put them back together.
+
+## One row per operation
+
+The same three checkouts, logged as wide events:
+
+```json
+{"level":"error","service":"checkout","duration_ms":3.27,"op":"checkout","user":{"id":"u_2"},"cart":{"items":3},"payment":{"last4":"4242"},"error":{"message":"Payment failed","status":402,"code":"CARD_DECLINED","why":"Issuer declined the charge","fix":"Try a different payment method","type":"WidelogError"}}
+{"level":"info","service":"checkout","duration_ms":6.45,"op":"checkout","user":{"id":"u_3"},"cart":{"items":3},"payment":{"last4":"4242"},"order":{"id":"o_u_3"}}
+{"level":"info","service":"checkout","duration_ms":9.87,"op":"checkout","user":{"id":"u_1"},"cart":{"items":3},"payment":{"last4":"4242"},"order":{"id":"o_u_1"}}
+```
+
+Twelve lines became three rows, and the question answers itself. `u_2` failed, the issuer
+declined it, the cart had three items, it took 3.27ms to find out, and the person reading this
+at 3am is told what to try next.
+
+Nothing was stitched together to get there. The fields were written by four different
+functions during the request, and they landed in one object because
+[`use_logger()`](/reference/api) reads a `contextvars` slot rather than taking a logger
+argument. Concurrency is what makes line logs ambiguous, and it is exactly what `contextvars`
+is built to keep straight.
+
+<Aside type="note" title="This is the same log volume">
+  Three rows instead of twelve lines is not a compression trick. It is the same information
+  with the joins already performed, written once at the end of the operation instead of in
+  pieces along the way.
+</Aside>
+
+## The failure nobody reported
+
+Attribution is the obvious win. This one is easier to miss.
+
+```json
+{"level": "warn", "op": "checkout", "retries": 2, "status": 200}
+```
+
+That user got a clean 200. Their order went through, they noticed nothing, and they will not
+be filing a ticket. But the pricing service reset the connection twice on the way, and the row
+says so.
+
+Wide events record the operation, not the failure. Every checkout emits a row whether it
+succeeded, failed, or succeeded the third time. That gives you three things without writing
+any extra instrumentation:
+
+- a denominator, so an error rate is `errors / operations` rather than `errors / guesswork`
+- degraded paths that still returned 200: retries, fallbacks, slow dependencies
+- `duration_ms` on every row, so a latency regression shows up without a separate metric
+
+A line-per-step setup records the retry only if somebody thought to log the retry. Here it is
+recorded because recording the operation is the whole design.
+
+## Two bugs wearing the same face
+
+Both of these reached the user as `500`, and both say `RuntimeError: checkout failed`:
+
+```text
+outer=RuntimeError   root=KeyError       at services/cart.py:35
+outer=RuntimeError   root=TimeoutError   at services/gateway.py:35
+```
+
+One is a cache miss. One is a payment gateway that stopped answering. They need different
+people woken up, and at the surface they are indistinguishable.
+
+`error.causes` is the chain behind the error, following `__cause__` before `__context__`, so
+`raise ... from exc` gives you the real origin rather than whatever happened to be in flight.
+Because `causes[-1].type` is a field and not a substring of a message, you can group on it,
+count it, and alert on it. Alert on the root cause, not on the symptom that fifty different
+bugs share.
+
+The `stack` entries point at your code: widelog filters its own frames out before recording
+them, so the first line you read is never the logging library's.
+
+## Handing it to a model
+
+Everything above applies equally to a human reading the log and to a model doing it. But two
+properties matter more when the reader is a model.
+
+The first is that a model asked to explain the twelve-line version will answer. It will pick a
+user, describe the failure confidently, and be wrong some fraction of the time, because
+interleaved lines are precisely the shape that invites a plausible guess. Given one row, there
+is nothing to guess at.
+
+The second is redaction. Look back at the wide events: `payment.last4` is there and the
+idempotency token is not, because keys ending in `token`, `password`, `secret`,
+`authorization`, `apikey`, and `cookie` are replaced at any depth before anything is written.
+Pasting logs into a model hosted by somebody else is a decision about where your credentials
+end up. It is a much easier decision when they were never in the log.
+
+`why` and `fix` help too, for a reason worth stating plainly: you wrote them. A model reading
+`CARD_DECLINED` with `why: Issuer declined the charge` is repeating a fact, not forming a
+hypothesis.
+
+## What this does not do
+
+widelog produces the evidence. It does not look at it. There is no alerting, no aggregation,
+no anomaly detection, and no sampling — those belong to whatever you point `sink` at.
+
+The gap worth knowing about before you build on this: there is no correlation identifier
+across services. Within one process the `contextvars` slot keeps a request's fields together,
+and on Lambda the X-Ray `trace_id` is picked up automatically, but a failure that spans three
+services gives a reader no key to join on unless you set one yourself. If that is your shape,
+put a request id in the event at the edge and thread it through, and the rows will line up.
+
+<Aside type="note" title="Where to start">
+  [Quickstart](/quickstart) is four lines of setup. [Requests](/guides/requests) covers the
+  ASGI middleware, and [Errors](/guides/errors) covers catalogs, which is where `why` and `fix`
+  stop being something you retype at every raise site.
+</Aside>
