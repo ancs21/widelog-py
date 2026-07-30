@@ -10,11 +10,21 @@ The shortest path from nothing to one event you can read.
 
 <Steps>
   <Step title="Install">
-    ```sh
-    bun add widelog-py     # or: uv add widelog-py
-    ```
+    <Tabs>
+      <TabItem label="uv">
+        ```sh
+        uv add widelog-py
+        ```
+      </TabItem>
+      <TabItem label="pip">
+        ```sh
+        pip install widelog-py
+        ```
+      </TabItem>
+    </Tabs>
 
-    The distribution is `widelog-py`. The import is `widelog`.
+    The distribution is `widelog-py`. The import is `widelog`. Nothing else is pulled in:
+    widelog uses only the standard library.
   </Step>
 
   <Step title="Log one operation">
