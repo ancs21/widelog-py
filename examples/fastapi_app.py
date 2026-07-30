@@ -1,4 +1,4 @@
-"""FastAPI + widelog — one wide event per request.
+"""FastAPI with widelog: one wide event per request.
 
     uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
 
@@ -36,7 +36,7 @@ async def on_widelog_error(request: Request, exc: WidelogError) -> JSONResponse:
     """Put why/fix on the wire and in the wide event.
 
     FastAPI handles the exception before it reaches WidelogMiddleware, so the
-    middleware only sees the response status — record the error here, or lose it.
+    middleware only sees the response status. Record the error here, or lose it.
     `internal=` is not in `to_dict()`, so it never leaves the server.
     """
     use_logger().error(exc)

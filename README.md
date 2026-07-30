@@ -1,32 +1,26 @@
 # widelog
 
-**Digging through logs is not observability. It's hope.**
+widelog emits one structured event per operation instead of a line per step. Each event carries
+the context you attached during the operation, how long it took, and errors that say why they
+happened and what to do about them. It has no dependencies outside the standard library.
 
-One wide event per operation, with all the context, and errors that explain *why* and what to
-do next. Pure stdlib, zero dependencies.
+Python implementation of the wide-event approach from [evlog](https://evlog.dev). `contextvars`
+takes the place of `AsyncLocalStorage`, and one ASGI adapter covers what evlog handles with
+fifteen framework integrations.
 
-Python port of the idea behind [evlog](https://evlog.dev) by
-[HugoRCD](https://github.com/HugoRCD) — `contextvars` in place of `AsyncLocalStorage`, one
-ASGI adapter in place of evlog's fifteen framework integrations.
+## Install
 
 ```bash
 uv add widelog-py
 ```
 
-## The problem
+## Log a request
+
+Add the middleware once at startup. Then call `use_logger()` anywhere in the request to attach
+fields to that request's event.
 
 ```python
-print("Request received")
-print(f"User: {user.id}")
-print("Cart loaded")
-print("Payment failed")  # good luck finding this at 3am
-raise Exception("Something went wrong")
-```
-
-## The solution
-
-```python
-from widelog import WidelogMiddleware, WidelogError, use_logger, init
+from widelog import WidelogMiddleware, init, use_logger
 
 init(service="checkout")
 app.add_middleware(WidelogMiddleware)
@@ -37,54 +31,43 @@ async def checkout():
     log = use_logger()
     log.set(user={"id": user.id, "plan": "premium"})
     log.set(cart={"items": 3, "total": 9999})
-
-    if not paid:
-        raise WidelogError(
-            "Payment failed",
-            status=402,
-            why="Card declined by issuer",
-            fix="Try a different payment method or contact your bank",
-        )
+    return {"ok": True}
 ```
 
-One event on the way out, with everything in it:
+One JSON line goes out when the response does:
 
 ```json
 {
   "timestamp": "2026-07-30T10:23:45Z",
-  "level": "error",
+  "level": "info",
   "service": "checkout",
   "environment": "production",
   "duration_ms": 1204.7,
   "method": "POST",
   "path": "/api/checkout",
-  "status": 402,
+  "status": 200,
   "user": { "id": "u_123", "plan": "premium" },
-  "cart": { "items": 3, "total": 9999 },
-  "error": {
-    "message": "Payment failed",
-    "status": 402,
-    "why": "Card declined by issuer",
-    "fix": "Try a different payment method or contact your bank",
-    "type": "WidelogError"
-  }
+  "cart": { "items": 3, "total": 9999 }
 }
 ```
 
-## No logger to pass around
+`log.set()` merges. Dictionaries merge key by key, so a later `log.set(user={"tier": "gold"})`
+adds to `user` rather than replacing it. Lists concatenate. Anything else overwrites.
 
-`use_logger()` reads a `contextvars` slot, so any function in the call stack writes into the
-same event — no parameter threading, no DI container:
+## Attach fields from anywhere in the call stack
+
+`use_logger()` reads a `contextvars` slot, so a function several frames deep writes to the same
+event without taking a logger argument.
 
 ```python
-async def charge(cart):  # nobody handed it a logger
+async def charge(cart):
     use_logger().set(payment={"method": "card"})
 ```
 
-That's ambient context, not dependency injection. It's deliberate: a logger is cross-cutting,
-and FastAPI's `Depends` only resolves in a handler signature, so DI would mean threading `log`
-through every helper that wants to add a field. If you want it visible in the signature anyway,
-wrap it — same object either way:
+This is ambient context rather than dependency injection, and the choice is deliberate.
+FastAPI's `Depends` resolves only in a handler signature, so injecting the logger would mean
+passing `log` down through every helper that wants to add a field. If you want the dependency
+visible in the signature anyway, wrap it. You get the same object.
 
 ```python
 Log = Annotated[WideEvent, Depends(use_logger)]
@@ -94,17 +77,47 @@ Log = Annotated[WideEvent, Depends(use_logger)]
 async def checkout(log: Log): ...
 ```
 
-## Anything that isn't a request
+## Raise errors that explain themselves
+
+`WidelogError` carries an HTTP status and a machine-readable code, plus two fields written for
+whoever reads the log at 3am: `why` says what went wrong, `fix` says what to do next.
+
+```python
+raise WidelogError(
+    "Payment failed",
+    code="CARD_DECLINED",
+    status=402,
+    why="Issuer declined the charge",
+    fix="Try a different payment method or contact your bank",
+    internal={"processor_ref": "ch_live_x9"},
+)
+```
+
+`to_dict()` returns everything except `internal`, so you can put the error straight on the
+wire. FastAPI converts the exception into a response before the middleware sees it, so record
+it in an exception handler:
+
+```python
+@app.exception_handler(WidelogError)
+async def on_widelog_error(request, exc):
+    use_logger().error(exc)
+    return JSONResponse(status_code=exc.status, content=exc.to_dict())
+```
+
+Without that handler the client gets a 500 and the event has no `error` field.
+
+## Log work that is not a request
 
 ```python
 from widelog import wide_event
 
 with wide_event(job="nightly-reconcile") as log:
     log.set(rows=len(rows))
-    # emits once on the way out, including if the block raises
 ```
 
-## AWS Lambda
+The event is emitted when the block exits, including when the block raises.
+
+## Deploy to AWS Lambda
 
 ```python
 from widelog import lambda_wide_event, use_logger
@@ -116,58 +129,64 @@ def handler(event, context):
     return {"statusCode": 200}
 ```
 
-Adds `request_id`, `cold_start`, `function`, `remaining_ms`, X-Ray `trace_id`, plus `method`
-and `path` from Function URL / API Gateway v1 and v2 payloads.
+The decorator adds `request_id`, `cold_start`, `function`, `remaining_ms`, and the X-Ray
+`trace_id`. It reads `method` and `path` from Function URL, API Gateway v1, and API Gateway v2
+payloads.
 
-**Timeout guard.** When an invocation is 500ms from its deadline, the event is emitted early
-with `"timed_out": true`. Without that, Lambda kills the process and you lose the event for
-the one invocation you actually needed. `emit()` is idempotent, so a normal return afterwards
-is a no-op.
+500ms before the invocation deadline, widelog emits the event with `"timed_out": true`. Lambda
+kills the process at the deadline, so otherwise a timed-out invocation leaves no record at all.
+`emit()` is idempotent, so a normal return after the guard has fired does nothing.
 
-No drain or `waitUntil` needed — on Lambda, stdout *is* CloudWatch Logs.
+The default sink writes to stdout, which Lambda forwards to CloudWatch Logs. You do not need a
+drain or a `waitUntil` callback.
 
 ## Examples
 
-Both are runnable and covered by `tests/test_examples.py`, so they can't rot.
+`tests/test_examples.py` exercises both of these, so they stay working.
 
 ```bash
-uv run examples/aws_lambda_handler.py          # no AWS needed: authorized, declined, timed out
+uv run examples/aws_lambda_handler.py
 uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
 ```
 
-`examples/fastapi_app.py` also shows the one piece of wiring FastAPI needs: an
-`@app.exception_handler(WidelogError)` that calls `use_logger().error(exc)`. FastAPI converts
-the exception to a response *before* it reaches the middleware, so without that handler you
-get a 500 and the error never lands in the event.
+The Lambda example needs no AWS account and prints three events: one authorized, one declined,
+one that hits the timeout guard.
 
 ## API
 
 | | |
 |---|---|
-| `init(service=…, environment=…, redact=…, sink=…)` | configure once at startup |
-| `use_logger()` | the current event; standalone (emits per call) if there's none |
-| `wide_event(**fields)` | context manager scoping one event |
-| `log.set(dict)` / `log.set(**kw)` | add context — dicts deep-merge, lists concat |
-| `log.info/warn/debug/error(…)` | record a message; worst level wins |
-| `log.set_level(level)` | pin the level, ignoring later `error()`/`warn()` |
-| `log.emit(**overrides)` | emit and seal — idempotent |
-| `WidelogError(msg, code=, status=, why=, fix=, link=, internal=)` | self-explaining error |
-| `WidelogMiddleware` | ASGI: FastAPI, Starlette, Litestar, Django-async |
-| `lambda_wide_event` | AWS Lambda handler decorator |
+| `init(service=…, environment=…, redact=…, sink=…)` | Configure once at startup. |
+| `use_logger()` | The current event. Outside an operation, returns a standalone logger that emits on each call. |
+| `wide_event(**fields)` | Context manager that scopes one event. |
+| `log.set(dict)` or `log.set(**kw)` | Attach context. Dictionaries merge, lists concatenate. |
+| `log.info/warn/debug/error(…)` | Record a message. The most severe level wins. |
+| `log.set_level(level)` | Pin the level so later `error()` and `warn()` calls cannot raise it. |
+| `log.emit(**overrides)` | Emit and seal the event. Idempotent. |
+| `WidelogError(msg, code=, status=, why=, fix=, link=, internal=)` | Error with a status and an explanation. |
+| `WidelogMiddleware` | ASGI. Covers FastAPI, Starlette, Litestar, and Django-async. |
+| `lambda_wide_event` | Decorator for an AWS Lambda handler. |
 
-`sink` takes a `callable(dict)` — point it at your backend. Default writes NDJSON to stdout.
+`sink` takes a `callable(dict)`. Point it at your backend, or leave it unset to write NDJSON to
+stdout.
+
+### Redaction
 
 Keys named `password`, `token`, `secret`, `authorization`, `apikey`, or `cookie` are replaced
-with `[REDACTED]` at any depth, case- and separator-insensitively (`api_key`, `API-KEY`,
-`apiKey`). Override with `init(redact={…})`. `WidelogError(internal=…)` never reaches the event
-at all.
+with `[REDACTED]` at any depth. Matching ignores case, underscores, and hyphens, so `api_key`,
+`API-KEY`, and `apiKey` all match. Pass `init(redact={…})` to replace the set.
+`WidelogError(internal=…)` is never serialized into the event or `to_dict()`.
 
-Mutating a sealed event warns on stderr and drops the data, rather than losing it silently.
+### Sealed events
 
-## Not ported (yet)
+`emit()` seals the event. A `set()` after that prints a warning to stderr and drops the data, so
+you can see the loss instead of wondering where a field went.
 
-Sampling, batched drain to a backend, pretty dev terminal, audit hash-chaining, the CLI,
-SQS/SNS/EventBridge batch triggers, WSGI (Flask, Django-sync). Open an issue if you want one.
+## Not implemented
+
+Sampling, batched delivery to a backend, a pretty development terminal, audit hash-chaining, the
+CLI, SQS and SNS and EventBridge batch triggers, and WSGI for Flask and Django-sync. Open an
+issue if you need one of them.
 
 ## Development
 
@@ -180,5 +199,5 @@ uv build
 
 ## License
 
-MIT © An Pham. The wide-event design is from [evlog](https://github.com/HugoRCD/evlog)
-(MIT © HugoRCD); this is an independent Python implementation of it.
+MIT, An Pham. The wide-event design comes from [evlog](https://github.com/HugoRCD/evlog)
+(MIT, HugoRCD). This is an independent Python implementation of it.

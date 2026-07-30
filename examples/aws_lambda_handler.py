@@ -1,11 +1,11 @@
-"""AWS Lambda + widelog — one wide event per invocation.
+"""AWS Lambda with widelog: one wide event per invocation.
 
-Run it locally, no AWS and no dependencies:
+Run it locally without an AWS account or any dependencies:
 
     uv run examples/aws_lambda_handler.py
 
-Deploy as-is: the default sink writes NDJSON to stdout, which on Lambda already
-*is* CloudWatch Logs. No drain, no waitUntil, no extension.
+Deploy it as it is. The default sink writes NDJSON to stdout, and Lambda forwards
+stdout to CloudWatch Logs, so you do not need a drain or a waitUntil callback.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except WidelogError as exc:
         # Catch and return, so API Gateway answers 402 instead of 502.
         # Let it raise instead when you want Lambda to mark the invocation
-        # failed and retry — the event is still emitted either way.
+        # failed and retry. The event is emitted either way.
         log.error(exc)
         return {"statusCode": exc.status, "body": json.dumps(exc.to_dict())}
 

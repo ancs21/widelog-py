@@ -1,4 +1,4 @@
-"""widelog — one wide event per operation, not ten scattered log lines.
+"""widelog: one wide event per operation, instead of a line per step.
 
 Wide-event logging for Python, inspired by evlog (https://evlog.dev).
 `contextvars` replaces AsyncLocalStorage; one ASGI adapter replaces evlog's
@@ -135,8 +135,8 @@ class WideEvent:
     def _mutate(self, data: dict[str, Any], level: str | None = None) -> None:
         if self._emitted:
             print(
-                f"[widelog] mutation after emit, dropped: {sorted(data)} — "
-                "wrap background work in its own wide_event()",
+                f"[widelog] mutation after emit, dropped: {sorted(data)}. "
+                "Wrap background work in its own wide_event().",
                 file=sys.stderr,
             )
             return
@@ -169,8 +169,8 @@ class WideEvent:
 
     def emit(self, **overrides: Any) -> dict[str, Any] | None:
         """Emit the wide event. Seals the logger."""
-        # ponytail: unlocked flag check — a Lambda timeout racing a normal return can
-        # duplicate one line. Cheaper than a lock on every emit.
+        # ponytail: unlocked flag check, so a Lambda timeout racing a normal return can
+        # duplicate one line. Cheaper than taking a lock on every emit.
         if self._emitted:
             return None
         self._emitted = True
