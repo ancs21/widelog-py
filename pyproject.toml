@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "widelog-py"
 dynamic = ["version"]
-description = "One wide event per operation, not ten scattered log lines."
+description = "One wide event per operation, instead of a line per step."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -35,7 +35,9 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/ancs21/widelog-py"
+Source = "https://github.com/ancs21/widelog-py"
 Issues = "https://github.com/ancs21/widelog-py/issues"
+Changelog = "https://github.com/ancs21/widelog-py/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -51,6 +53,21 @@ path = "src/widelog/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/widelog"]
+
+# Without an explicit list the sdist swallows docs/node_modules, which is
+# 11,885 files and 151MB, over PyPI's per-file limit.
+[tool.hatch.build.targets.sdist]
+# Leading slashes anchor to the project root. Without them, "README.md" also
+# matches every nested node_modules/*/README.md.
+include = [
+  "/src/widelog",
+  "/tests",
+  "/examples",
+  "/README.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,18 +1,25 @@
 # widelog
 
+[![PyPI](https://img.shields.io/pypi/v/widelog-py?color=black)](https://pypi.org/project/widelog-py/)
+[![Python](https://img.shields.io/pypi/pyversions/widelog-py?color=black)](https://pypi.org/project/widelog-py/)
+[![CI](https://img.shields.io/github/actions/workflow/status/ancs21/widelog-py/ci.yml?branch=main&color=black)](https://github.com/ancs21/widelog-py/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-black)](https://github.com/ancs21/widelog-py/blob/main/LICENSE)
+
 widelog emits one structured event per operation instead of a line per step. Each event carries
 the context you attached during the operation, how long it took, and errors that say why they
 happened and what to do about them. It has no dependencies outside the standard library.
 
-Python implementation of the wide-event approach from [evlog](https://evlog.dev). `contextvars`
-takes the place of `AsyncLocalStorage`, and one ASGI adapter covers what evlog handles with
-fifteen framework integrations.
+widelog is a Python implementation of the wide-event approach from [evlog](https://evlog.dev).
+`contextvars` takes the place of `AsyncLocalStorage`, and one ASGI adapter covers what evlog
+handles with fifteen framework integrations.
 
 ## Install
 
 ```bash
-uv add widelog-py
+uv add widelog-py     # or: pip install widelog-py
 ```
+
+Python 3.10 or later. The distribution is `widelog-py`, the import is `widelog`.
 
 ## Log a request
 
@@ -215,15 +222,14 @@ drain or a `waitUntil` callback.
 
 ## Examples
 
-`tests/test_examples.py` exercises both of these, so they stay working.
-
 ```bash
 uv run examples/aws_lambda_handler.py
 uv run --with fastapi --with uvicorn uvicorn examples.fastapi_app:app
 ```
 
-The Lambda example needs no AWS account and prints three events: one authorized, one declined,
-one that hits the timeout guard.
+The Lambda example needs no AWS account. It prints three events: one authorized, one declined,
+and one that hits the timeout guard. Both examples are covered by `tests/test_examples.py`, so
+they cannot drift out of date without CI noticing.
 
 ## API
 
@@ -257,8 +263,8 @@ readable. Pass `init(redact={…})` to replace the set with your own names.
 
 ### Limits
 
-Fields are copied as they enter the event, so widelog never writes back into the dicts and
-lists you pass to `set()`. Nesting is kept to 32 levels and anything deeper becomes
+widelog copies every field as it enters the event, so it never writes back into the dicts and
+lists you pass to `set()`. It keeps nesting to 32 levels and replaces anything deeper with
 `[TRUNCATED]`, which also makes a self-referential payload safe to log.
 
 ### Sealed events
