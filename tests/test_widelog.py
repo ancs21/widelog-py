@@ -7,6 +7,7 @@ import pytest
 
 from widelog import (
     REDACTED,
+    TRUNCATED,
     WideEvent,
     WidelogError,
     WidelogMiddleware,
@@ -322,3 +323,60 @@ def test_unserializable_field_does_not_break_the_request(seen, capsys):
         log.set(obj=obj)
 
     assert "Traceback" not in capsys.readouterr().err
+
+
+# --- hardening: observation must not mutate what it observes ---
+
+
+def test_set_does_not_mutate_the_callers_dict(seen):
+    profile = {"id": "u_1"}
+    with wide_event() as log:
+        log.set(user=profile)
+        log.set(user={"plan": "premium"})
+
+    assert profile == {"id": "u_1"}
+    assert seen[0]["user"] == {"id": "u_1", "plan": "premium"}
+
+
+def test_set_does_not_mutate_a_nested_caller_dict(seen):
+    profile = {"address": {"city": "Hanoi"}}
+    with wide_event() as log:
+        log.set(user=profile)
+        log.set(user={"address": {"zip": "10000"}})
+
+    assert profile == {"address": {"city": "Hanoi"}}
+    assert seen[0]["user"]["address"] == {"city": "Hanoi", "zip": "10000"}
+
+
+def test_set_does_not_mutate_the_callers_list(seen):
+    tags = ["a"]
+    with wide_event() as log:
+        log.set(tags=tags)
+        log.set(tags=["b"])
+
+    assert tags == ["a"]
+    assert seen[0]["tags"] == ["a", "b"]
+
+
+def test_deeply_nested_payload_is_truncated_not_fatal(seen):
+    deep = cursor = {}
+    for _ in range(2000):
+        cursor["n"] = {}
+        cursor = cursor["n"]
+
+    with wide_event() as log:
+        log.set(body=deep)
+
+    assert len(seen) == 1
+    assert TRUNCATED in str(seen[0])
+
+
+def test_self_referential_payload_does_not_hang(seen):
+    looping: dict = {"name": "root"}
+    looping["self"] = looping
+
+    with wide_event() as log:
+        log.set(body=looping)
+
+    assert len(seen) == 1
+    assert TRUNCATED in str(seen[0])

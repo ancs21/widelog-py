@@ -21,6 +21,7 @@ from typing import Any
 
 __all__ = [
     "REDACTED",
+    "TRUNCATED",
     "WideEvent",
     "WidelogError",
     "WidelogMiddleware",
@@ -33,6 +34,9 @@ __all__ = [
 __version__ = "0.1.0"
 
 REDACTED = "[REDACTED]"
+TRUNCATED = "[TRUNCATED]"
+# Deep enough for real payloads, shallow enough that a hostile one cannot exhaust the stack.
+_MAX_DEPTH = 32
 _RANK = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 
 _current: contextvars.ContextVar[WideEvent | None] = contextvars.ContextVar("widelog_event", default=None)
@@ -91,18 +95,34 @@ def _norm(key: str) -> str:
     return key.lower().replace("_", "").replace("-", "")
 
 
-def _merge(target: dict[str, Any], source: dict[str, Any]) -> None:
-    """Recursive merge: dicts deep-merge, lists concat, everything else replaces."""
+def _copy(value: Any, depth: int) -> Any:
+    """Snapshot the caller's data, so a later merge never writes back into it."""
+    if depth >= _MAX_DEPTH:
+        return TRUNCATED
+    if isinstance(value, dict):
+        return {k: _copy(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy(v, depth + 1) for v in value]
+    return value
+
+
+def _merge(target: dict[str, Any], source: dict[str, Any], depth: int = 0) -> None:
+    """Recursive merge: dicts deep-merge, lists concat, everything else replaces.
+
+    `target` is always owned by widelog and `source` always belongs to the caller,
+    so every value crossing over is copied. The depth cap bounds both this and the
+    later redaction walk, so a hostile payload cannot exhaust the stack.
+    """
     for key, value in source.items():
         if value is None:
             continue
         current = target.get(key)
-        if isinstance(value, dict) and isinstance(current, dict):
-            _merge(current, value)
+        if isinstance(value, dict) and isinstance(current, dict) and depth < _MAX_DEPTH:
+            _merge(current, value, depth + 1)
         elif isinstance(value, list) and isinstance(current, list):
-            current.extend(value)
+            current.extend(_copy(item, depth + 1) for item in value)
         else:
-            target[key] = value
+            target[key] = _copy(value, depth)
 
 
 def _redact(value: Any, keys: set[str]) -> Any:
@@ -127,8 +147,9 @@ def _describe(error: BaseException | str) -> dict[str, Any]:
 class WideEvent:
     """Accumulates every field for one operation, emits exactly one log line."""
 
-    def __init__(self, _immediate: bool = False, **fields: Any) -> None:
-        self.fields: dict[str, Any] = {k: v for k, v in fields.items() if v is not None}
+    def __init__(self, fields: dict[str, Any] | None = None, *, _immediate: bool = False) -> None:
+        self.fields: dict[str, Any] = {}
+        _merge(self.fields, fields or {})
         self.level = "info"
         self._explicit_level: str | None = None
         self._started = time.perf_counter()
@@ -221,7 +242,7 @@ def use_logger() -> WideEvent:
 @contextmanager
 def wide_event(**fields: Any) -> Iterator[WideEvent]:
     """Scope one wide event. Captures exceptions, always emits exactly once."""
-    event = WideEvent(**fields)
+    event = WideEvent(fields)
     token = _current.set(event)
     try:
         yield event
