@@ -18,13 +18,16 @@ export async function GET() {
     "",
   ];
 
-  // Sort leaves + groups alphabetically into a single stable list.
-  type Row = { key: string; line: string };
+  // Sort by sidebar order, so the index reads in the order the site does.
+  // Alphabetical put the guides group ahead of the introduction.
+  type Row = { order: number; key: string; line: string };
   const rows: Row[] = [];
 
   for (const leaf of leaves) {
     const description = leaf.description ? ` — ${leaf.description}` : "";
+    const data = leaf.entry.data as { sidebar?: { order?: number } };
     rows.push({
+      order: data.sidebar?.order ?? Number.MAX_SAFE_INTEGER,
       key: leaf.url,
       line: `- [${leaf.title}](${new URL(leaf.markdownUrl, config.site).href})${description}`,
     });
@@ -33,13 +36,21 @@ export async function GET() {
   for (const group of groups) {
     // Older doc versions have their own /<v>/llms.txt; don't list them here.
     if (group.kind === "version") continue;
+    // A group sorts by its earliest member, which is how the sidebar places it.
+    const order = Math.min(
+      ...group.members.map((member) => {
+        const data = member.entry.data as { sidebar?: { order?: number } };
+        return data.sidebar?.order ?? Number.MAX_SAFE_INTEGER;
+      }),
+    );
     rows.push({
+      order,
       key: `/${group.slug}`,
       line: `- [${group.label}](${new URL(`/${group.slug}/llms.txt`, config.site).href})`,
     });
   }
 
-  rows.sort((a, b) => a.key.localeCompare(b.key));
+  rows.sort((a, b) => a.order - b.order || a.key.localeCompare(b.key));
   for (const row of rows) lines.push(row.line);
 
   lines.push("");

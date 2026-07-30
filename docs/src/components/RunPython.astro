@@ -25,7 +25,7 @@ const id = `run-${Math.random().toString(36).slice(2, 9)}`;
   <pre data-output class="nb-run-output" hidden></pre>
 </div>
 
-<script define:vars={{ id, widelogSource, pyodideBase }}>
+<script is:inline define:vars={{ id, widelogSource, pyodideBase }}>
   (() => {
     const root = document.getElementById(id);
     const button = root.querySelector("[data-run]");

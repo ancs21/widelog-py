@@ -44,12 +44,26 @@ export async function getStaticPaths() {
     }));
 }
 
+/**
+ * Sidebar order, so an agent reads a section in the order a human would.
+ * Alphabetical would put "AWS Lambda" ahead of "FastAPI" no matter what the
+ * sidebar says.
+ */
+function sidebarOrder(item: IndexedEntry): number {
+  const data = item.entry.data as { sidebar?: { order?: number } };
+  return data.sidebar?.order ?? Number.MAX_SAFE_INTEGER;
+}
+
 export async function GET({ props }: { props: SectionProps }) {
   const { label, members } = props;
 
+  const ordered = [...members].sort(
+    (a, b) => sidebarOrder(a) - sidebarOrder(b) || a.title.localeCompare(b.title),
+  );
+
   const lines = [`# ${label}`, "", "## Pages", ""];
 
-  for (const item of members) {
+  for (const item of ordered) {
     const description = item.description ? ` — ${item.description}` : "";
     lines.push(
       `- [${item.title}](${new URL(item.markdownUrl, config.site).href})${description}`,
