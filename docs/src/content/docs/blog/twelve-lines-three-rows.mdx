@@ -24,16 +24,16 @@ order created id=o_u_3
 order created id=o_u_1
 ```
 
-Read it again and answer one question: whose payment failed?
+Which user's payment failed?
 
 Nothing in those twelve lines says. `payment failed` sits between `u_2` and `u_3`, and it is
-not adjacent to either for any reason other than scheduling. You can work it out by
-elimination, because three checkouts produced two `order created` lines and `u_2` is the one
-missing, but that is reasoning from absence. It works here because there are three requests.
-It does not work at four hundred.
+not next to either one for any reason except scheduling. You can work it out by elimination,
+since three checkouts produced two `order created` lines and `u_2` is the one missing, but that
+is reasoning from absence. It works here because there are three requests. At four hundred it
+stops working.
 
-The lines are not badly written. Every one of them carries a real fact. The problem is that
-the facts were separated at birth and the log has no way to put them back together.
+None of those lines is badly written, and every one of them carries a real fact. They were
+written separately, and the log has no way to put them back together.
 
 ## One row per operation
 
@@ -46,43 +46,39 @@ The same three checkouts, logged as wide events:
 ```
 
 Twelve lines became three rows, and the question answers itself. `u_2` failed, the issuer
-declined it, the cart had three items, it took 3.27ms to find out, and the person reading this
-at 3am is told what to try next.
+declined it, the cart had three items, it took 3.27ms to find out, and whoever reads this at
+3am is told what to try next.
 
-Nothing was stitched together to get there. The fields were written by four different
-functions during the request, and they landed in one object because
-[`use_logger()`](/reference/api) reads a `contextvars` slot rather than taking a logger
-argument. Concurrency is what makes line logs ambiguous, and it is exactly what `contextvars`
-is built to keep straight.
+Nothing was stitched together to get there. Four different functions wrote those fields during
+the request, and they landed in one object because [`use_logger()`](/reference/api) reads a
+`contextvars` slot instead of taking a logger argument. Concurrency is what makes line logs
+ambiguous, and keeping concurrent work straight is what `contextvars` is for.
 
 <Aside type="note" title="This is the same log volume">
-  Three rows instead of twelve lines is not a compression trick. It is the same information
-  with the joins already performed, written once at the end of the operation instead of in
-  pieces along the way.
+  Three rows instead of twelve lines is the same information with the joins already done,
+  written once when the operation ends rather than in pieces along the way.
 </Aside>
 
 ## The failure nobody reported
-
-Attribution is the obvious win. This one is easier to miss.
 
 ```json
 {"level": "warn", "op": "checkout", "retries": 2, "status": 200}
 ```
 
 That user got a clean 200. Their order went through, they noticed nothing, and they will not
-be filing a ticket. But the pricing service reset the connection twice on the way, and the row
+be filing a ticket. The pricing service reset the connection twice on the way, and the row
 says so.
 
-Wide events record the operation, not the failure. Every checkout emits a row whether it
-succeeded, failed, or succeeded the third time. That gives you three things without writing
-any extra instrumentation:
+A wide event covers the whole operation, so the row exists whether the checkout succeeded,
+failed, or succeeded on the third try. You get all of this without writing extra
+instrumentation:
 
 - a denominator, so an error rate is `errors / operations` rather than `errors / guesswork`
-- degraded paths that still returned 200: retries, fallbacks, slow dependencies
+- degraded paths that still returned 200, such as retries and fallbacks
 - `duration_ms` on every row, so a latency regression shows up without a separate metric
 
-A line-per-step setup records the retry only if somebody thought to log the retry. Here it is
-recorded because recording the operation is the whole design.
+A line-per-step setup records that retry only if somebody thought to log the retry. Here it is
+in the row because the row covers the operation either way.
 
 ## Two bugs wearing the same face
 
@@ -93,48 +89,48 @@ outer=RuntimeError   root=KeyError       at services/cart.py:35
 outer=RuntimeError   root=TimeoutError   at services/gateway.py:35
 ```
 
-One is a cache miss. One is a payment gateway that stopped answering. They need different
-people woken up, and at the surface they are indistinguishable.
+One is a cache miss and one is a payment gateway that stopped answering. At the surface they
+look identical, and they need different people woken up.
 
 `error.causes` is the chain behind the error, following `__cause__` before `__context__`, so
 `raise ... from exc` gives you the real origin rather than whatever happened to be in flight.
-Because `causes[-1].type` is a field and not a substring of a message, you can group on it,
-count it, and alert on it. Alert on the root cause, not on the symptom that fifty different
-bugs share.
+Because `causes[-1].type` is a field rather than a substring of a message, you can group on it,
+count it, and page on it. That means alerting on the root cause instead of on a symptom that
+fifty unrelated bugs all produce.
 
-The `stack` entries point at your code: widelog filters its own frames out before recording
-them, so the first line you read is never the logging library's.
+The `stack` entries point at your code, since widelog filters its own frames out before
+recording them. The first line you read is never the logging library's.
 
 ## Handing it to a model
 
-Everything above applies equally to a human reading the log and to a model doing it. But two
+Everything above applies as much to a model reading the log as to a person. Two of these
 properties matter more when the reader is a model.
 
-The first is that a model asked to explain the twelve-line version will answer. It will pick a
-user, describe the failure confidently, and be wrong some fraction of the time, because
-interleaved lines are precisely the shape that invites a plausible guess. Given one row, there
-is nothing to guess at.
+A model asked to explain the twelve-line version will answer. It will pick a user, describe
+the failure with some confidence, and be wrong a fraction of the time, because interleaved
+lines are exactly the shape that invites a plausible guess. One row leaves nothing to guess
+at.
 
-The second is redaction. Look back at the wide events: `payment.last4` is there and the
-idempotency token is not, because keys ending in `token`, `password`, `secret`,
+Redaction matters for a different reason. Look back at the wide events: `payment.last4` is
+there and the idempotency token is not, because keys ending in `token`, `password`, `secret`,
 `authorization`, `apikey`, and `cookie` are replaced at any depth before anything is written.
-Pasting logs into a model hosted by somebody else is a decision about where your credentials
-end up. It is a much easier decision when they were never in the log.
+Pasting logs into a model that somebody else hosts is a decision about where your credentials
+end up, and that decision gets much easier when the credentials were never in the log.
 
-`why` and `fix` help too, for a reason worth stating plainly: you wrote them. A model reading
-`CARD_DECLINED` with `why: Issuer declined the charge` is repeating a fact, not forming a
-hypothesis.
+`why` and `fix` help as well, because you wrote them. A model reading `CARD_DECLINED` with
+`why: Issuer declined the charge` is repeating something you already knew rather than forming
+a hypothesis about it.
 
 ## What this does not do
 
-widelog produces the evidence. It does not look at it. There is no alerting, no aggregation,
-no anomaly detection, and no sampling — those belong to whatever you point `sink` at.
+widelog produces the evidence and never looks at it. There is no alerting, no aggregation, no
+anomaly detection, and no sampling. Those belong to whatever you point `sink` at.
 
-The gap worth knowing about before you build on this: there is no correlation identifier
-across services. Within one process the `contextvars` slot keeps a request's fields together,
-and on Lambda the X-Ray `trace_id` is picked up automatically, but a failure that spans three
-services gives a reader no key to join on unless you set one yourself. If that is your shape,
-put a request id in the event at the edge and thread it through, and the rows will line up.
+There is also no correlation identifier across services. Within one process the `contextvars`
+slot keeps a request's fields together, and on Lambda the X-Ray `trace_id` is picked up for
+you, but a failure spanning three services gives a reader no key to join on unless you set one
+yourself. If that is your shape, put a request id on the event at the edge and thread it
+through, and the rows will line up.
 
 <Aside type="note" title="Where to start">
   [Quickstart](/quickstart) is four lines of setup. [Requests](/guides/requests) covers the
