@@ -22,6 +22,7 @@ Call once at startup. Later calls update only the keys you pass.
 | `environment` | `str` | `$ENVIRONMENT` or `"development"` | Stamped on every event. |
 | `redact` | iterable of `str` | see [Redaction](#redaction) | Replaces the default name list. |
 | `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. |
+| `stack_depth` | `int` | `5` | Frames kept per traceback, counted from the innermost. |
 
 ## Recording
 
@@ -93,6 +94,40 @@ Every event carries these, then your fields:
 | `level` | `debug`, `info`, `warn`, or `error`. |
 | `service`, `environment` | From `init()`. |
 | `duration_ms` | Absent on standalone one-off lines, which measure nothing. |
+
+## Errors on an event
+
+`log.error(exc)` and an exception that ends a `wide_event()` both write an `error` object:
+
+| Field | Notes |
+|---|---|
+| `message`, `type` | `str(exc)` and the exception class name. |
+| `status`, `code`, `why`, `fix`, `link` | From `WidelogError`, when set. |
+| `stack` | The innermost frames, `path:line in function`. widelog's own frames are filtered out, so the first entry is your code. |
+| `causes` | The chain behind this error, outermost first, each with its own `type`, `message`, and `stack`. |
+
+The chain follows `__cause__` first, so `raise X from Y` and `WidelogError(cause=Y)` win over an
+incidental `__context__`. `raise X from None` ends it, and the chain stops after five links or on
+a cycle.
+
+```json
+{
+  "message": "Payment failed",
+  "status": 402,
+  "type": "WidelogError",
+  "stack": ["app/checkout.py:41 in checkout"],
+  "causes": [
+    {
+      "type": "ValueError",
+      "message": "connection reset by peer",
+      "stack": ["app/gateway.py:12 in charge", "app/gateway.py:6 in post"]
+    }
+  ]
+}
+```
+
+`to_dict()` carries none of this. The stack and the chain stay in your logs and never reach the
+client.
 
 ## Redaction
 

@@ -154,8 +154,8 @@ call site, and `internal` merges with the call site winning:
 
 ```python
 raise BillingErrors.PAYMENT_DECLINED(
-    link="/support/payment-issues",       # overrides the spec
-    internal={"processor_ref": "ch_x"},   # merged, stays server-side
+    link="/support/payment-issues",  # overrides the spec
+    internal={"processor_ref": "ch_x"},  # merged, stays server-side
     cause=stripe_error,
 )
 ```
@@ -251,6 +251,15 @@ they cannot drift out of date without CI noticing.
 
 `sink` takes a `callable(dict)`. Point it at your backend, or leave it unset to write NDJSON to
 stdout.
+
+### Tracebacks
+
+An `error` on the event carries `stack`, the innermost frames as `path:line in function`, and
+`causes`, the chain behind it. The chain follows `__cause__` before `__context__`, so
+`raise X from Y` and `WidelogError(cause=Y)` win over an exception that happened to be in flight.
+`raise X from None` ends the chain. widelog filters its own frames out, so the first entry is
+always your code. `init(stack_depth=N)` changes how many frames are kept, five by default, and
+none of it reaches `to_dict()`.
 
 ### Redaction
 

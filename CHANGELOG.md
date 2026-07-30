@@ -26,6 +26,10 @@ First release.
   `cookie`, at any depth, ignoring case, underscores, and hyphens.
 - A copy-on-write field merge, so widelog never mutates the dicts and lists you pass it, with
   nesting capped at 32 levels.
+- Tracebacks on the event: `error.stack` holds the innermost frames with widelog's own filtered
+  out, and `error.causes` holds the chain behind the error, following `__cause__` before
+  `__context__` and stopping at `raise ... from None`. `init(stack_depth=N)` sets how many frames
+  to keep. Neither reaches `to_dict()`.
 
 ### Notes
 

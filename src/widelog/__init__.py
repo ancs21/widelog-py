@@ -42,6 +42,9 @@ REDACTED = "[REDACTED]"
 TRUNCATED = "[TRUNCATED]"
 # Deep enough for real payloads, shallow enough that a hostile one cannot exhaust the stack.
 _MAX_DEPTH = 32
+# Deep enough to show the path into the failure without burying the event.
+_DEFAULT_STACK_DEPTH = 5
+_MAX_CAUSES = 5
 _RANK = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 
 _current: contextvars.ContextVar[WideEvent | None] = contextvars.ContextVar("widelog_event", default=None)
@@ -52,6 +55,7 @@ _config: dict[str, Any] = {
     # Normalized by init(), so emit() never has to re-normalize per event.
     "redact": ("password", "token", "secret", "authorization", "apikey", "cookie"),
     "sink": None,  # callable(dict) -> None; default is NDJSON on stdout
+    "stack_depth": _DEFAULT_STACK_DEPTH,
 }
 
 
@@ -244,14 +248,46 @@ def _redact(value: Any, needles: tuple[str, ...]) -> Any:
     return value
 
 
+def _frames(tb: Any) -> list[str]:
+    """The innermost frames, minus widelog's own, which are never the bug."""
+    frames = [f for f in traceback.extract_tb(tb) if f.filename != __file__]
+    depth = _config["stack_depth"]
+    return [f"{f.filename}:{f.lineno} in {f.name}" for f in frames[-depth:]]
+
+
+def _next_in_chain(error: BaseException) -> BaseException | None:
+    """`raise X from Y` beats an incidental context, and `from None` ends the chain."""
+    if error.__cause__ is not None:
+        return error.__cause__
+    return None if error.__suppress_context__ else error.__context__
+
+
+def _chain(error: BaseException) -> list[dict[str, Any]]:
+    causes: list[dict[str, Any]] = []
+    visited = {id(error)}
+    current = _next_in_chain(error)
+    while current is not None and id(current) not in visited and len(causes) < _MAX_CAUSES:
+        visited.add(id(current))
+        entry: dict[str, Any] = {"type": type(current).__name__, "message": str(current)}
+        frames = _frames(current.__traceback__)
+        if frames:
+            entry["stack"] = frames
+        causes.append(entry)
+        current = _next_in_chain(current)
+    return causes
+
+
 def _describe(error: BaseException | str) -> dict[str, Any]:
     if isinstance(error, str):
         return {"message": error}
     out = error.to_dict() if isinstance(error, WidelogError) else {"message": str(error)}
     out["type"] = type(error).__name__
-    frames = traceback.extract_tb(error.__traceback__)[-2:]
+    frames = _frames(error.__traceback__)
     if frames:
-        out["stack"] = [f"{f.filename}:{f.lineno} in {f.name}" for f in frames]
+        out["stack"] = frames
+    causes = _chain(error)
+    if causes:
+        out["causes"] = causes
     return out
 
 
