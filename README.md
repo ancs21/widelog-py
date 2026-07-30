@@ -172,15 +172,29 @@ stdout.
 
 ### Redaction
 
-Keys named `password`, `token`, `secret`, `authorization`, `apikey`, or `cookie` are replaced
-with `[REDACTED]` at any depth. Matching ignores case, underscores, and hyphens, so `api_key`,
-`API-KEY`, and `apiKey` all match. Pass `init(redact={…})` to replace the set.
-`WidelogError(internal=…)` is never serialized into the event or `to_dict()`.
+Keys ending in `password`, `token`, `secret`, `authorization`, `apikey`, or `cookie` are
+replaced with `[REDACTED]` at any depth. Matching ignores case, underscores, and hyphens, and
+looks at the end of the key, so `refresh_token`, `x-api-key`, `set-cookie`,
+`proxy-authorization`, and `apiKey` all match. `tokens_used` does not, so metrics stay
+readable. Pass `init(redact={…})` to replace the set with your own names.
+`WidelogError(internal=…)` is never serialized into the event or into `to_dict()`.
+
+### Limits
+
+Fields are copied as they enter the event, so widelog never writes back into the dicts and
+lists you pass to `set()`. Nesting is kept to 32 levels and anything deeper becomes
+`[TRUNCATED]`, which also makes a self-referential payload safe to log.
 
 ### Sealed events
 
 `emit()` seals the event. A `set()` after that prints a warning to stderr and drops the data, so
 you can see the loss instead of wondering where a field went.
+
+### Failure
+
+`emit()` never raises. If your sink is down, or a field cannot be serialized, widelog reports
+the dropped event on stderr and returns `None`. Logging is not allowed to fail the request it
+is describing, or to replace the exception the application is already handling.
 
 ## Not implemented
 

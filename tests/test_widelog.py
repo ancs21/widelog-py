@@ -427,3 +427,30 @@ def test_custom_redact_set_is_normalized(seen):
 
     assert seen[0]["x_trace_secret"] == REDACTED
     assert seen[0]["password"] == "not-in-the-custom-set"
+
+
+# --- hardening: the fields a backend sorts and charts on ---
+
+
+def test_timestamp_has_millisecond_precision(seen):
+    with wide_event() as log:
+        log.set(ok=True)
+
+    timestamp = seen[0]["timestamp"]
+    assert timestamp.endswith("Z")
+    seconds, _, millis = timestamp[:-1].rpartition(".")
+    assert seconds and len(millis) == 3 and millis.isdigit()
+
+
+def test_standalone_logger_reports_no_duration(seen):
+    log = use_logger()  # no active operation, so every call emits on its own
+    log.info("a")
+    time.sleep(0.3)
+    log.info("b")
+
+    first, second = seen
+    # A one-off line spans no operation. Reporting the gap since the last call
+    # would attribute 300ms of unrelated work to info("b").
+    assert "duration_ms" not in first
+    assert "duration_ms" not in second
+    assert second["messages"] == [{"level": "info", "message": "b"}]

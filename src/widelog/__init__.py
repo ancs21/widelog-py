@@ -17,6 +17,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 __all__ = [
@@ -181,7 +182,14 @@ class WideEvent:
             self.level = level
         if self._immediate:
             self.emit()
-            self.fields, self._emitted, self._explicit_level = {}, False, None
+            self._reset()
+
+    def _reset(self) -> None:
+        """Immediate mode reuses one object per call site, so clear the last event."""
+        self.fields = {}
+        self.level = "info"
+        self._explicit_level = None
+        self._emitted = False
 
     def set(self, context: dict[str, Any] | None = None, **kwargs: Any) -> None:
         """Add context to the wide event. Dicts deep-merge, lists concat."""
@@ -205,12 +213,17 @@ class WideEvent:
 
     def _build(self, overrides: dict[str, Any]) -> dict[str, Any]:
         _merge(self.fields, overrides)
+        # An immediate one-off line measures no operation, so it carries no duration.
+        elapsed = (
+            {} if self._immediate else {"duration_ms": round((time.perf_counter() - self._started) * 1000, 2)}
+        )
         return {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            # Millisecond precision, because backends sort on this field.
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "level": self._explicit_level or self.level,
             "service": _config["service"],
             "environment": _config["environment"],
-            "duration_ms": round((time.perf_counter() - self._started) * 1000, 2),
+            **elapsed,
             **_redact(self.fields, _config["redact"]),
         }
 
