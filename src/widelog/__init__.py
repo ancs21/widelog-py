@@ -125,11 +125,23 @@ def _merge(target: dict[str, Any], source: dict[str, Any], depth: int = 0) -> No
             target[key] = _copy(value, depth)
 
 
-def _redact(value: Any, keys: set[str]) -> Any:
+def _is_secret(key: str, needles: tuple[str, ...]) -> bool:
+    """Match on the end of the key, so `refresh_token` and `x-api-key` are caught.
+
+    A substring match would also hit `tokens_used`, which is an ordinary metric.
+    """
+    normalized = _norm(key)
+    return any(normalized.endswith(needle) for needle in needles)
+
+
+def _redact(value: Any, needles: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
-        return {k: REDACTED if _norm(k) in keys else _redact(v, keys) for k, v in value.items()}
+        return {
+            key: REDACTED if _is_secret(key, needles) else _redact(item, needles)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_redact(v, keys) for v in value]
+        return [_redact(item, needles) for item in value]
     return value
 
 

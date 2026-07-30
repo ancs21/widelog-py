@@ -380,3 +380,50 @@ def test_self_referential_payload_does_not_hang(seen):
 
     assert len(seen) == 1
     assert TRUNCATED in str(seen[0])
+
+
+# --- hardening: redaction has to catch the prefixed spellings too ---
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "password",
+        "user_password",
+        "token",
+        "refresh_token",
+        "access_token",
+        "id_token",
+        "api_key",
+        "x-api-key",
+        "apiKey",
+        "cookie",
+        "set-cookie",
+        "authorization",
+        "proxy-authorization",
+        "secret",
+        "client_secret",
+    ],
+)
+def test_secret_key_spellings_are_redacted(seen, key):
+    with wide_event() as log:
+        log.set(**{key: "SENSITIVE"})
+
+    assert seen[0][key] == REDACTED
+
+
+@pytest.mark.parametrize("key", ["tokens_used", "token_count", "secretary", "cookies_accepted"])
+def test_lookalike_keys_are_not_redacted(seen, key):
+    with wide_event() as log:
+        log.set(**{key: 42})
+
+    assert seen[0][key] == 42
+
+
+def test_custom_redact_set_is_normalized(seen):
+    init(redact={"X-Trace-Secret"})
+    with wide_event() as log:
+        log.set(x_trace_secret="SENSITIVE", password="not-in-the-custom-set")
+
+    assert seen[0]["x_trace_secret"] == REDACTED
+    assert seen[0]["password"] == "not-in-the-custom-set"
