@@ -33,7 +33,7 @@ __all__ = [
 __version__ = "0.1.0"
 
 REDACTED = "[REDACTED]"
-_LEVELS = ("debug", "info", "warn", "error")
+_RANK = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 
 _current: contextvars.ContextVar[WideEvent | None] = contextvars.ContextVar("widelog_event", default=None)
 
@@ -141,7 +141,7 @@ class WideEvent:
             )
             return
         _merge(self.fields, data)
-        if level and _LEVELS.index(level) > _LEVELS.index(self.level):
+        if level and _RANK[level] > _RANK[self.level]:
             self.level = level
         if self._immediate:
             self.emit()
@@ -191,6 +191,13 @@ class WideEvent:
         return event
 
 
+def _record_status(log: WideEvent, status: int) -> None:
+    """A 5xx is the one status that makes the whole event an error."""
+    log.set(status=status)
+    if status >= 500:
+        log.set_level("error")
+
+
 def use_logger() -> WideEvent:
     """The wide event for the current operation.
 
@@ -231,9 +238,7 @@ class WidelogMiddleware:
 
             async def send_wrapper(message: dict) -> None:
                 if message["type"] == "http.response.start":
-                    log.set(status=message["status"])
-                    if message["status"] >= 500:
-                        log.set_level("error")
+                    _record_status(log, message["status"])
                 await send(message)
 
             await self.app(scope, receive, send_wrapper)
@@ -242,30 +247,51 @@ class WidelogMiddleware:
 _cold_start = True
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Lambda payloads are whatever the trigger sent, so never assume a shape."""
+    return value if isinstance(value, dict) else {}
+
+
 def _lambda_fields(event: Any, context: Any) -> dict[str, Any]:
-    fields: dict[str, Any] = {}
+    # getattr tolerates context=None, so local invocations need no special case
+    fn = {
+        "name": getattr(context, "function_name", None),
+        "version": getattr(context, "function_version", None),
+        "memory_mb": getattr(context, "memory_limit_in_mb", None),
+    }
+    payload = _as_dict(event)
+    http = _as_dict(_as_dict(payload.get("requestContext")).get("http"))
 
-    if context is not None:
-        fields["request_id"] = getattr(context, "aws_request_id", None)
-        fn = {
-            "name": getattr(context, "function_name", None),
-            "version": getattr(context, "function_version", None),
-            "memory_mb": getattr(context, "memory_limit_in_mb", None),
-        }
-        fields["function"] = {k: v for k, v in fn.items() if v is not None} or None
-
-    # X-Ray trace id, so the wide event joins the trace instead of floating beside it
-    fields["trace_id"] = os.getenv("_X_AMZN_TRACE_ID")
-
-    if isinstance(event, dict):
-        request_context = event.get("requestContext")
-        http = request_context.get("http", {}) if isinstance(request_context, dict) else {}
-        http = http if isinstance(http, dict) else {}
-        # Function URL / API Gateway v2, then v1 / ALB
-        fields["method"] = http.get("method") or event.get("httpMethod")
-        fields["path"] = http.get("path") or event.get("rawPath") or event.get("path")
-
+    fields = {
+        "request_id": getattr(context, "aws_request_id", None),
+        # X-Ray trace id, so the event joins the trace instead of floating beside it
+        "trace_id": os.getenv("_X_AMZN_TRACE_ID"),
+        "function": {k: v for k, v in fn.items() if v is not None} or None,
+        # Function URL / API Gateway v2 first, then v1 / ALB
+        "method": http.get("method") or payload.get("httpMethod"),
+        "path": http.get("path") or payload.get("rawPath") or payload.get("path"),
+    }
     return {k: v for k, v in fields.items() if v is not None}
+
+
+@contextmanager
+def _timeout_guard(log: WideEvent, remaining: Callable[[], int] | None) -> Iterator[None]:
+    """Emit before Lambda kills the process at the deadline, or the event is lost."""
+    budget = remaining() / 1000 - 0.5 if remaining else 0
+
+    def emit_before_timeout() -> None:
+        log.set_level("error")
+        log.emit(timed_out=True)
+
+    timer = threading.Timer(budget, emit_before_timeout) if budget > 0 else None
+    if timer:
+        timer.daemon = True
+        timer.start()
+    try:
+        yield
+    finally:
+        if timer:
+            timer.cancel()
 
 
 def lambda_wide_event(handler: Callable[[Any, Any], Any]) -> Callable[[Any, Any], Any]:
@@ -291,31 +317,14 @@ def lambda_wide_event(handler: Callable[[Any, Any], Any]) -> Callable[[Any, Any]
             fields["cold_start"] = True
             _cold_start = False
 
-        with wide_event(**fields) as log:
-
-            def emit_before_timeout() -> None:
-                log.set_level("error")
-                log.emit(timed_out=True)
-
-            timer = None
-            remaining = getattr(context, "get_remaining_time_in_millis", None)
+        remaining = getattr(context, "get_remaining_time_in_millis", None)
+        with wide_event(**fields) as log, _timeout_guard(log, remaining):
+            result = handler(event, context)
+            status = _as_dict(result).get("statusCode")
+            if isinstance(status, int):
+                _record_status(log, status)
             if remaining:
-                budget = remaining() / 1000 - 0.5
-                if budget > 0:
-                    timer = threading.Timer(budget, emit_before_timeout)
-                    timer.daemon = True
-                    timer.start()
-            try:
-                result = handler(event, context)
-                if isinstance(result, dict) and isinstance(result.get("statusCode"), int):
-                    log.set(status=result["statusCode"])
-                    if result["statusCode"] >= 500:
-                        log.set_level("error")
-                if remaining:
-                    log.set(remaining_ms=remaining())
-                return result
-            finally:
-                if timer:
-                    timer.cancel()
+                log.set(remaining_ms=remaining())
+            return result
 
     return wrapper
