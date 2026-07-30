@@ -36,7 +36,8 @@ __all__ = [
     "wide_event",
 ]
 
-__version__ = "0.1.0"
+# CalVer, YYYY.M.MICRO. Unpadded, so PEP 440 normalization leaves it alone.
+__version__ = "2026.7.0"
 
 REDACTED = "[REDACTED]"
 TRUNCATED = "[TRUNCATED]"

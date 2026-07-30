@@ -1,10 +1,12 @@
 # Changelog
 
 All notable changes to widelog are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[semantic versioning](https://semver.org/spec/v2.0.0.html).
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions are
+[CalVer](https://calver.org/): `YYYY.M.MICRO`, where MICRO counts releases
+within the month. A version says when it shipped, not what it promises about
+compatibility, so read the notes below before upgrading.
 
-## [0.1.0]
+## [2026.7.0]
 
 First release.
 
@@ -36,3 +38,5 @@ First release.
 - `emit()` never raises. A failing sink or an unserializable field is reported on stderr and
   dropped, rather than failing the request or replacing the exception already in flight.
 - Requires Python 3.10 or later, and nothing outside the standard library.
+- Since the version number carries no compatibility promise, every breaking change gets its own
+  `### Changed` or `### Removed` entry here. Pin `widelog-py==2026.7.0` if you need one.
