@@ -311,4 +311,4 @@ bun run build
 
 ## License
 
-MIT, An Pham.
+MIT.
