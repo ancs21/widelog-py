@@ -9,6 +9,14 @@ widelog emits one structured event per operation instead of a line per step. Eac
 the context you attached during the operation, how long it took, and errors that say why they
 happened and what to do about them. It has no dependencies outside the standard library.
 
+Documentation: **[widelog-py.pages.dev](https://widelog-py.pages.dev)**. The
+[introduction](https://widelog-py.pages.dev/introduction) runs its example in the browser, and
+the guides cover [requests](https://widelog-py.pages.dev/guides/requests),
+[errors](https://widelog-py.pages.dev/guides/errors),
+[FastAPI](https://widelog-py.pages.dev/guides/fastapi),
+[AWS Lambda](https://widelog-py.pages.dev/guides/aws-lambda), and
+[OTLP](https://widelog-py.pages.dev/guides/otlp).
+
 ## Install
 
 ```bash
@@ -355,6 +363,14 @@ bun install
 bun run dev          # http://localhost:4321
 bun run lint:docs    # frontmatter shape and internal links
 bun run build
+```
+
+It deploys to Cloudflare Pages, which is what serves
+[widelog-py.pages.dev](https://widelog-py.pages.dev):
+
+```bash
+cd docs && bun run build
+npx wrangler pages deploy dist --project-name widelog-py --branch main
 ```
 
 ## License
