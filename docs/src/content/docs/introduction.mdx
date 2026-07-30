@@ -27,34 +27,77 @@ correlating timestamps.
 
 ## One event instead
 
+This is the whole program. Click Run and it executes in your browser, on real CPython compiled to
+WebAssembly, with the same widelog source the package ships.
+
+<RunPython>
 ```python
-log = use_logger()
-log.set(user={"id": user.id, "plan": "premium"})
-log.set(cart={"items": 3, "total": 9999})
+from widelog import ErrorCatalog, ErrorSpec, init, use_logger, wide_event
+
+init(service="checkout", environment="local")
+
+
+class BillingErrors(ErrorCatalog, prefix="billing"):
+    INSUFFICIENT_FUNDS = ErrorSpec(
+        status=402,
+        message=lambda available, required: f"Insufficient funds: {available} of {required}",
+        why="The account balance did not cover the cart total",
+        fix="Add funds and retry",
+    )
+
+
+def load_cart(user_id):
+    return {"items": 3, "total": 9999}
+
+
+def charge(card, token):
+    # Nobody passed this function a logger. It writes to the same event anyway.
+    use_logger().set(payment={"method": "card", "last4": card[-4:], "token": token})
+    raise BillingErrors.INSUFFICIENT_FUNDS(available=5000, required=9999)
+
+
+with wide_event(method="POST", path="/api/checkout") as log:
+    log.set(user={"id": "u_123", "plan": "premium"})
+    log.set(cart=load_cart("u_123"))
+    try:
+        charge("4242424242424242", "idem_abc")
+    except Exception as exc:
+        log.error(exc)
 ```
+</RunPython>
+
+One event comes out, carrying everything the request collected:
 
 ```json
 {
-  "timestamp": "2026-07-30T10:23:45.612Z",
+  "timestamp": "2026-07-30T04:22:51.213Z",
   "level": "error",
   "service": "checkout",
-  "duration_ms": 1204.7,
+  "environment": "local",
+  "duration_ms": 0.1,
   "method": "POST",
   "path": "/api/checkout",
-  "status": 402,
   "user": { "id": "u_123", "plan": "premium" },
   "cart": { "items": 3, "total": 9999 },
+  "payment": { "method": "card", "last4": "4242", "token": "[REDACTED]" },
   "error": {
-    "message": "Payment failed",
-    "code": "billing.PAYMENT_DECLINED",
-    "why": "Issuer declined the charge",
-    "fix": "Try a different payment method"
+    "message": "Insufficient funds: 5000 of 9999",
+    "status": 402,
+    "code": "billing.INSUFFICIENT_FUNDS",
+    "why": "The account balance did not cover the cart total",
+    "fix": "Add funds and retry",
+    "type": "WidelogError",
+    "stack": ["main.py:29 in <module>", "main.py:22 in charge"]
   }
 }
 ```
 
-One row per operation, with every field on it. Querying becomes filtering rather than
-correlating: `status = 402 and user.plan = "premium"` is a single condition over one table.
+Four things happened there without being asked for. `charge()` never received a logger and still
+wrote to the event. The `token` came out redacted. The error carried its own status, code, `why`,
+and `fix`, because the catalog declared them once. And the level became `error` on its own.
+
+Querying this is filtering rather than correlating: `status = 402 and user.plan = "premium"` is one
+condition over one table.
 
 ## What you get
 

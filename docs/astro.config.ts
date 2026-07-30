@@ -22,6 +22,8 @@ export default defineConfig({
   // Astro 7's Vite 8 bundler).
   vite: {
     plugins: [tailwindcss()],
+    // RunPython.astro imports the package source from one level up
+    server: { fs: { allow: [".", ".."] } },
   },
   // Hover-prefetch link targets so full-page navigations feel instant without
   // a client-side router.

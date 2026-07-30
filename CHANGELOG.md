@@ -33,6 +33,12 @@ First release.
   `__context__` and stopping at `raise ... from None`. `init(stack_depth=N)` sets how many frames
   to keep. Neither reaches `to_dict()`.
 
+### Docs
+
+- The introduction runs its full example in the browser on Pyodide. widelog is one stdlib-only
+  module, so its source is inlined at build time and written into Pyodide's filesystem, with no
+  package install and no dependency on the release being on PyPI. Pyodide loads only on click.
+
 ### Notes
 
 - `emit()` never raises. A failing sink or an unserializable field is reported on stderr and

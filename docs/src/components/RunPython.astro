@@ -1,0 +1,126 @@
+---
+// Runs the fenced Python inside the slot in the reader's browser, on Pyodide.
+//
+// widelog is a single stdlib-only module, so the source is read at build time
+// and written straight into Pyodide's filesystem. No package install, no
+// micropip, and no dependency on widelog-py being published.
+//
+// Pyodide itself is ~10MB and loads only when someone clicks Run.
+// ?raw so Vite inlines it at build time. import.meta.url would resolve against
+// the bundled chunk instead of this file.
+import widelogSource from "../../../src/widelog/__init__.py?raw";
+
+const pyodideBase = "https://cdn.jsdelivr.net/npm/pyodide@314.0.3/";
+const id = `run-${Math.random().toString(36).slice(2, 9)}`;
+---
+
+<div id={id} class="nb-run">
+  <div data-source><slot /></div>
+
+  <div class="nb-run-bar">
+    <button type="button" data-run>Run it</button>
+    <span data-status class="nb-run-status"></span>
+  </div>
+
+  <pre data-output class="nb-run-output" hidden></pre>
+</div>
+
+<script define:vars={{ id, widelogSource, pyodideBase }}>
+  (() => {
+    const root = document.getElementById(id);
+    const button = root.querySelector("[data-run]");
+    const status = root.querySelector("[data-status]");
+    const output = root.querySelector("[data-output]");
+    const source = root.querySelector("[data-source] code") ?? root.querySelector("[data-source] pre");
+
+    let runtime = null;
+
+    async function boot() {
+      status.textContent = "fetching Python, about 10MB, once per visit";
+      const { loadPyodide } = await import(`${pyodideBase}pyodide.mjs`);
+      const py = await loadPyodide({ indexURL: pyodideBase });
+      py.FS.mkdirTree("/home/pyodide/widelog");
+      py.FS.writeFile("/home/pyodide/widelog/__init__.py", widelogSource);
+      return py;
+    }
+
+    function pretty(line) {
+      try {
+        return JSON.stringify(JSON.parse(line), null, 2);
+      } catch {
+        return line;
+      }
+    }
+
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      output.hidden = false;
+      output.textContent = "";
+      try {
+        runtime ??= await boot();
+        const lines = [];
+        runtime.setStdout({ batched: (line) => lines.push(line) });
+        runtime.setStderr({ batched: (line) => lines.push(line) });
+        status.textContent = "running";
+        await runtime.runPythonAsync(source.textContent);
+        output.textContent = lines.map(pretty).join("\n\n") || "(the script printed nothing)";
+        status.textContent = "done";
+      } catch (error) {
+        output.textContent = String(error);
+        status.textContent = "failed";
+      } finally {
+        button.disabled = false;
+      }
+    });
+  })();
+</script>
+
+<style>
+  .nb-run {
+    margin: 1.5rem 0;
+  }
+
+  .nb-run-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .nb-run button {
+    border: 1px solid var(--nb-color-border, currentColor);
+    border-radius: 0.5rem;
+    padding: 0.35rem 0.85rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    cursor: pointer;
+    background: transparent;
+    color: inherit;
+  }
+
+  .nb-run button:hover:not(:disabled) {
+    background: var(--nb-color-accent, rgb(0 0 0 / 0.05));
+  }
+
+  .nb-run button:disabled {
+    opacity: 0.55;
+    cursor: progress;
+  }
+
+  .nb-run-status {
+    font-size: 0.8125rem;
+    color: var(--nb-color-muted-foreground, inherit);
+    opacity: 0.75;
+  }
+
+  .nb-run-output {
+    margin-top: 0.75rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--nb-color-border, currentColor);
+    border-radius: 0.5rem;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    white-space: pre;
+  }
+</style>
