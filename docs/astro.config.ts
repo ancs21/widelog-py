@@ -5,9 +5,10 @@ import nimbus, { defineConfig as defineNimbusConfig } from "@cloudflare/nimbus-d
 import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
 
 const nimbusConfig = defineNimbusConfig({
-  // Confirm before the first deploy: drives canonical URLs, OG image URLs,
-  // robots.txt, the sitemap, and the links in /llms.txt.
-  site: "https://widelog-docs.workers.dev",
+  // Drives canonical URLs, OG image URLs, robots.txt, the sitemap, and the
+  // links in /llms.txt. Must match where the site actually answers, or every
+  // page points search engines at a host that does not resolve.
+  site: "https://widelog-py.pages.dev",
   title: "widelog",
   description: "One wide event per operation, not a line per step. Wide-event logging for Python.",
   locale: "en",
