@@ -6,6 +6,25 @@ All notable changes to widelog are recorded here. The format follows
 within the month. A version says when it shipped, not what it promises about
 compatibility, so read the notes below before upgrading.
 
+## [2026.7.3]
+
+### Added
+
+- `widelog.otlp`, which exports wide events to any OTLP collector over HTTP with JSON, using
+  nothing outside the standard library. `init(sink=OTLPSink(endpoint=...))` is the whole setup.
+  A separate import, so nothing changes for a project writing NDJSON to stdout.
+  - One event becomes one log record. `service`, `environment`, `version` and `region` become
+    resource attributes under their OpenTelemetry names, `level` becomes a severity number,
+    nested fields flatten to dotted keys, and the error message or the last message becomes the
+    body. `trace_id` is promoted to the record's trace id only when it really is 32 hex
+    characters, so an X-Ray header stays an attribute rather than being rejected.
+  - Sending is on a background thread and batches whatever has queued. A collector that is slow
+    or down costs events, never latency: the queue is bounded, drops are counted on
+    `OTLPSink.dropped`, and nothing raises into the request being described.
+  - Verified against `otel/opentelemetry-collector-contrib`, not only against its own tests.
+- `examples/microservices.py`: a gateway and a downstream service, each emitting its own event,
+  joined by one forwarded header. The gateway records what the call cost and what came back.
+
 ## [2026.7.2]
 
 ### Fixed

@@ -255,6 +255,46 @@ noticing.
 `sink` takes a `callable(dict)`. Point it at your backend, or leave it unset to write NDJSON to
 stdout.
 
+### OpenTelemetry
+
+`widelog.otlp` exports to any OTLP collector over HTTP with JSON, using nothing outside the
+standard library. It is a separate import, so a project writing to stdout never loads it.
+
+```python
+from widelog import init
+from widelog.otlp import OTLPSink
+
+init(service="checkout", sink=OTLPSink(endpoint="http://localhost:4318"))
+```
+
+`endpoint` may include the `/v1/logs` suffix or not. `OTEL_EXPORTER_OTLP_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_HEADERS` are read when the arguments are omitted, and header values are
+url-decoded, which is how Grafana writes them.
+
+One event becomes one log record. `service`, `environment`, `version`, and `region` become the
+resource attributes `service.name`, `deployment.environment`, `service.version`, and
+`cloud.region`. `level` becomes a severity, nested fields flatten to dotted keys, and the error
+message or the last message becomes the record body. A `trace_id` is promoted to the record's
+trace id only when it is genuinely 32 hex characters — an X-Ray header or a hand-rolled
+correlation id stays an ordinary attribute, where it is still searchable, instead of being
+rejected by the collector.
+
+Sending happens on a background thread. If the collector is slow or down, events queue and then
+drop, counted on `OTLPSink.dropped` and reported once on stderr. They never block the request or
+raise into it. `flush()` waits for the queue to empty, `close()` stops the worker, and `close()`
+is registered to run at interpreter exit.
+
+```python
+sink = OTLPSink(
+    endpoint="https://otlp.example.com",
+    headers={"Authorization": "Bearer …"},
+    resource_attributes={"cloud.provider": "aws"},
+    batch_size=100,  # per request
+    queue_size=10_000,  # events held before dropping
+    timeout=5.0,
+)
+```
+
 ### Tracebacks
 
 An `error` on the event carries `stack`, the innermost frames as `path:line in function`, and

@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 # CalVer, YYYY.M.MICRO. Unpadded, so PEP 440 normalization leaves it alone.
-__version__ = "2026.7.2"
+__version__ = "2026.7.3"
 
 REDACTED = "[REDACTED]"
 TRUNCATED = "[TRUNCATED]"
