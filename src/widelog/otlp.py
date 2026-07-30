@@ -1,7 +1,17 @@
 """Wide events as OTLP, over HTTP with JSON, using nothing outside the standard library.
 
+    from widelog import init
+    from widelog.otlp import OTLPSink
+
+    init(service="checkout", sink=OTLPSink(endpoint="http://localhost:4318"))
+
 One wide event becomes one OTLP log record: `service` and `environment` describe
 the resource, `level` becomes a severity, and everything else becomes attributes.
+Sending happens on a background thread, because widelog is not allowed to make
+your request wait on a collector.
+
+JSON over HTTP rather than protobuf over gRPC, because that is the OTLP encoding
+reachable from the standard library. Every collector accepts it.
 
 This module is optional. Importing `widelog` does not import it, so a project that
 writes NDJSON to stdout pays nothing for it.
@@ -9,6 +19,15 @@ writes NDJSON to stdout pays nothing for it.
 
 from __future__ import annotations
 
+import atexit
+import json
+import os
+import queue
+import sys
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from typing import Any
 
@@ -91,8 +110,7 @@ def _body(event: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def to_otlp(event: dict[str, Any], resource_attributes: dict[str, Any] | None = None) -> dict[str, Any]:
-    """One wide event as an OTLP/HTTP JSON ExportLogsServiceRequest."""
+def _log_record(event: dict[str, Any]) -> dict[str, Any]:
     severity, severity_text = _SEVERITY.get(str(event.get("level")), _SEVERITY["info"])
 
     record: dict[str, Any] = {
@@ -119,19 +137,167 @@ def to_otlp(event: dict[str, Any], resource_attributes: dict[str, Any] | None = 
             continue
         _flatten(key, value, attributes)
     record["attributes"] = attributes
+    return record
 
-    resource = [
+
+def _resource(event: dict[str, Any], extra: dict[str, Any] | None) -> list[dict[str, Any]]:
+    attributes = [
         {"key": name, "value": _value(event[field])} for field, name in _RESOURCE.items() if field in event
     ]
-    resource += [{"key": k, "value": _value(v)} for k, v in (resource_attributes or {}).items()]
+    return attributes + [{"key": k, "value": _value(v)} for k, v in (extra or {}).items()]
+
+
+def to_otlp_batch(
+    events: list[dict[str, Any]], resource_attributes: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Many wide events as one export request, grouped by the resource they describe.
+
+    The grouping is not cosmetic. One process can emit for more than one service
+    -- a gateway calling a downstream in the same runtime, anything that overrides
+    `service` per event -- and flattening those into a single resource would file
+    one service's events under another's name.
+    """
+    groups: dict[str, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    for event in events:
+        attributes = _resource(event, resource_attributes)
+        key = json.dumps(attributes, sort_keys=True)
+        groups.setdefault(key, (attributes, []))[1].append(_log_record(event))
 
     return {
         "resourceLogs": [
             {
-                "resource": {"attributes": resource},
+                "resource": {"attributes": attributes},
                 "scopeLogs": [
-                    {"scope": {"name": "widelog", "version": __version__}, "logRecords": [record]},
+                    {"scope": {"name": "widelog", "version": __version__}, "logRecords": records},
                 ],
             }
+            for attributes, records in groups.values()
         ]
     }
+
+
+def to_otlp(event: dict[str, Any], resource_attributes: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One wide event as an OTLP/HTTP JSON ExportLogsServiceRequest."""
+    return to_otlp_batch([event], resource_attributes)
+
+
+def _env_headers() -> dict[str, str]:
+    """OTEL_EXPORTER_OTLP_HEADERS is `k=v,k2=v2`, and Grafana url-encodes its values."""
+    raw = os.getenv("OTEL_EXPORTER_OTLP_HEADERS") or os.getenv("OTLP_HEADERS") or ""
+    pairs = (item.split("=", 1) for item in raw.split(",") if "=" in item)
+    return {k.strip(): urllib.parse.unquote(v.strip()) for k, v in pairs}
+
+
+_STOP = object()
+
+
+class OTLPSink:
+    """A widelog sink that exports to an OTLP collector.
+
+        init(service="checkout", sink=OTLPSink(endpoint="http://localhost:4318"))
+
+    Events go onto a queue and a background thread sends them, so the request
+    being logged never waits on the network. When the queue is full events are
+    dropped and counted rather than blocking the caller: widelog is not allowed
+    to make the thing it describes slower or more likely to fail.
+    """
+
+    def __init__(
+        self,
+        endpoint: str | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        resource_attributes: dict[str, Any] | None = None,
+        timeout: float = 5.0,
+        batch_size: int = 100,
+        queue_size: int = 10_000,
+    ) -> None:
+        endpoint = endpoint or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or os.getenv("OTLP_ENDPOINT")
+        if not endpoint:
+            raise ValueError(
+                "widelog.otlp needs a collector: pass endpoint= or set OTEL_EXPORTER_OTLP_ENDPOINT"
+            )
+        # Half the world's OTLP config is a base URL and the other half already
+        # names the signal. Accept both rather than making it the caller's problem.
+        trimmed = endpoint.rstrip("/")
+        self.url = trimmed if trimmed.endswith("/v1/logs") else f"{trimmed}/v1/logs"
+        self.headers = {"Content-Type": "application/json", **_env_headers(), **(headers or {})}
+        self.resource_attributes = resource_attributes
+        self.timeout = timeout
+        self.batch_size = batch_size
+        self.dropped = 0
+
+        self._closed = False
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
+        self._worker = threading.Thread(target=self._run, name="widelog-otlp", daemon=True)
+        self._worker.start()
+        atexit.register(self.close)
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        if self._closed:
+            return
+        try:
+            self._queue.put_nowait(event)
+        except queue.Full:
+            self.dropped += 1
+            if self.dropped == 1:
+                # Once. A collector that cannot keep up would otherwise produce
+                # more output on stderr than it is failing to accept.
+                print(
+                    "[widelog/otlp] queue full, dropped an event. "
+                    "Further drops are silent; check OTLPSink.dropped.",
+                    file=sys.stderr,
+                )
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is _STOP:
+                self._queue.task_done()
+                return
+            # ponytail: batch whatever has piled up rather than waiting on a timer.
+            # Busy processes batch, idle ones send at once. Add a linger interval if
+            # request count against the collector ever matters more than latency.
+            batch, stopping = [item], False
+            while len(batch) < self.batch_size:
+                try:
+                    following = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if following is _STOP:
+                    stopping = True
+                    break
+                batch.append(following)
+
+            self._send(batch)
+            for _ in batch:
+                self._queue.task_done()
+            if stopping:
+                self._queue.task_done()
+                return
+
+    def _send(self, batch: list[dict[str, Any]]) -> None:
+        """Never raises. A collector's bad day is not the application's."""
+        try:
+            payload = json.dumps(to_otlp_batch(batch, self.resource_attributes), default=str)
+            request = urllib.request.Request(
+                self.url, data=payload.encode(), headers=self.headers, method="POST"
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout):
+                pass
+        except urllib.error.HTTPError as exc:
+            print(f"[widelog/otlp] collector rejected {len(batch)} event(s): {exc.code}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[widelog/otlp] dropped {len(batch)} event(s): {exc!r}", file=sys.stderr)
+
+    def flush(self) -> None:
+        """Block until everything queued has been sent."""
+        self._queue.join()
+
+    def close(self) -> None:
+        """Flush and stop the worker. Registered to run at interpreter exit."""
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(_STOP)
+        self._worker.join(timeout=self.timeout + 1)
