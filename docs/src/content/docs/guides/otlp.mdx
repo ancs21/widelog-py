@@ -1,0 +1,221 @@
+---
+title: OTLP
+description: Ship wide events to any OpenTelemetry collector over HTTP, on a background thread, using nothing outside the standard library.
+sidebar:
+  order: 6
+---
+
+The default sink writes NDJSON to stdout. `OTLPSink` sends the same events to an OpenTelemetry
+collector instead.
+
+```python
+from widelog import init
+from widelog.otlp import OTLPSink
+
+init(service="checkout", sink=OTLPSink(endpoint="http://localhost:4318"))
+```
+
+That is the whole setup. Everything else on this page is what happens after it.
+
+`widelog.otlp` is a separate import. Bringing in `widelog` does not bring in this module, so a
+project writing to stdout pays nothing for it.
+
+<Aside type="note" title="JSON over HTTP, not protobuf over gRPC">
+  OTLP defines both. Only one of them is reachable without a dependency, and every collector
+  accepts it. Keeping widelog to the standard library is worth more here than the smaller
+  payload.
+</Aside>
+
+## What one event becomes
+
+One wide event becomes one OTLP log record. The fields split three ways.
+
+| Goes to | Fields |
+| --- | --- |
+| Resource | `service` as `service.name`, `environment` as `deployment.environment`, `version` as `service.version`, `region` as `cloud.region` |
+| The record | `timestamp` as `timeUnixNano`, `level` as `severityNumber` and `severityText`, `trace_id` and `span_id` when they are valid |
+| Attributes | everything else, one attribute per top-level key |
+
+Resource fields describe the emitter rather than the operation, which is what lets a backend
+group by service without reading every record.
+
+This event:
+
+```python
+with wide_event(op="checkout", method="POST") as log:
+    log.set(user={"id": "u_2"}, cart={"items": 3, "total": 99.5}, retries=0, cached=False)
+    log.set(api_token="SENSITIVE")
+```
+
+arrives at the collector as this:
+
+```json
+{
+  "resourceLogs": [{
+    "resource": {"attributes": [
+      {"key": "service.name", "value": {"stringValue": "checkout"}},
+      {"key": "deployment.environment", "value": {"stringValue": "prod"}}
+    ]},
+    "scopeLogs": [{
+      "scope": {"name": "widelog", "version": "2026.7.3"},
+      "logRecords": [{
+        "timeUnixNano": "1785401287280000000",
+        "observedTimeUnixNano": "1785401287280000000",
+        "severityNumber": 9,
+        "severityText": "INFO",
+        "attributes": [
+          {"key": "duration_ms", "value": {"doubleValue": 0.01}},
+          {"key": "op", "value": {"stringValue": "checkout"}},
+          {"key": "method", "value": {"stringValue": "POST"}},
+          {"key": "user", "value": {"stringValue": "{\"id\":\"u_2\"}"}},
+          {"key": "cart", "value": {"stringValue": "{\"items\":3,\"total\":99.5}"}},
+          {"key": "retries", "value": {"intValue": "0"}},
+          {"key": "cached", "value": {"boolValue": false}},
+          {"key": "api_token", "value": {"stringValue": "[REDACTED]"}}
+        ]
+      }]
+    }]
+  }]
+}
+```
+
+Redaction runs before the sink does, so `api_token` was already `[REDACTED]` when the exporter
+saw it. Nothing about OTLP changes that.
+
+## Scalars keep their type, nested values do not
+
+`retries` went out as `intValue`, `cached` as `boolValue`, and `duration_ms` as `doubleValue`.
+Booleans are checked before integers, since `bool` subclasses `int` in Python and `True` would
+otherwise arrive as `1`.
+
+Dictionaries and lists are carried as JSON text. `cart` became a string containing
+`{"items":3,"total":99.5}` rather than a nested structure.
+
+This is a real tradeoff and worth understanding before you build dashboards on it. The object
+reaches the backend with its shape intact and readable, and full text search still reaches
+inside it, so both `match_all('99.5')` and `str_match(cart, '99.5')` find that row. What text
+cannot do is arithmetic. `avg(cart_total)` has no column to average, because those numbers live
+inside a string rather than in fields of their own.
+
+<Aside type="note" title="Put anything you aggregate at the top level">
+  `log.set(cart={"total": 99.5})` is searchable. `log.set(cart_total=99.5)` is searchable and
+  averageable. Nesting is for context you read, top-level scalars are for numbers you chart.
+</Aside>
+
+## Severity
+
+`level` maps onto OpenTelemetry's severity scale.
+
+| widelog | severityNumber | severityText |
+| --- | --- | --- |
+| `debug` | 5 | DEBUG |
+| `info` | 9 | INFO |
+| `warn` | 13 | WARN |
+| `error` | 17 | ERROR |
+
+The gaps are in the specification rather than in widelog. OpenTelemetry gives every level four
+steps, such as `INFO2` and `INFO3`, and widelog only uses the unqualified one of each.
+
+## The body
+
+OTLP records have a `body`, which is the line a backend shows in a list view before you open
+the record. widelog fills it with the error message when the event failed, otherwise the last
+message from `log.info()` and friends, and otherwise leaves it out.
+
+The whole event is in the attributes either way. The body only decides what you read first in a
+list.
+
+An event carrying an [error](/guides/errors) arrives like this, with the full chain preserved
+in the `error` attribute:
+
+```json
+"body": {"stringValue": "checkout failed"},
+"severityNumber": 17,
+"attributes": [
+  {"key": "error", "value": {"stringValue":
+    "{\"message\":\"checkout failed\",\"type\":\"RuntimeError\",\"causes\":[{\"type\":\"ValueError\",\"message\":\"row not found\"}]}"}}
+]
+```
+
+## Trace ids are validated, not trusted
+
+A `trace_id` field is promoted onto the record as `traceId` only when it is exactly 32
+hexadecimal characters. `span_id` needs exactly 16.
+
+Anything else stays an ordinary attribute. An X-Ray header and a hand-rolled correlation id are
+both useful and neither is a W3C trace id, and a collector would reject or silently drop them
+in that slot. Leaving them in attributes keeps them searchable instead.
+
+## Sending
+
+`OTLPSink.__call__` puts the event on a queue and returns. A daemon thread drains the queue and
+posts to `/v1/logs`. The request being logged never waits on the collector.
+
+Batching is opportunistic rather than timed. The worker takes whatever has piled up, capped at
+`batch_size`. A busy process batches on its own, and an idle one sends immediately, with no
+linger interval to tune.
+
+Events for different services are grouped into separate resources within one request. One
+process can emit for more than one service, and flattening them together would file one
+service's events under another's name.
+
+## When the collector is down
+
+Nothing about a collector's bad day reaches the application.
+
+- A send that fails prints to stderr and returns. It never raises into the request.
+- A rejection prints the collector's own response body, truncated, because that is where it
+  says which field it disliked. A bare 400 would otherwise be a scavenger hunt with `curl`.
+- A full queue drops the event and increments `OTLPSink.dropped`. The first drop prints to
+  stderr and the rest are silent, since a collector that cannot keep up would otherwise produce
+  more output on stderr than it is failing to accept.
+
+Check `sink.dropped` if you want to alarm on it.
+
+## Pre-forking servers
+
+Gunicorn and uWSGI with `--preload` build the sink in the master process and then fork. Threads
+do not survive a fork, so a child would otherwise inherit a queue with nobody draining it:
+events pile up, hit the cap, and drop, without anything raising or reaching stderr.
+
+`OTLPSink` registers a fork handler, so each child gets a fresh worker and its own queue.
+Whatever was queued at the moment of the fork stays with the parent, which still has it and
+still sends it. No configuration is needed for this.
+
+## Configuration
+
+```python
+OTLPSink(
+    endpoint="http://localhost:4318",   # or OTEL_EXPORTER_OTLP_ENDPOINT
+    headers={"x-api-key": "..."},       # merged over OTEL_EXPORTER_OTLP_HEADERS
+    resource_attributes={"host.name": "box-7"},
+    timeout=5.0,
+    batch_size=100,
+    queue_size=10_000,
+)
+```
+
+The endpoint may be a base URL or may already end in `/v1/logs`. Both work, because half of the
+OTLP configuration in the world names the signal and the other half does not.
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` are read when the arguments are
+not given, with `OTLP_ENDPOINT` and `OTLP_HEADERS` accepted as well. Header values are url
+decoded, which is what Grafana's generated configuration needs. Constructing a sink with no
+endpoint from either source raises immediately, rather than discarding events quietly.
+
+`flush()` blocks until everything queued has been sent, which is what you want in a test or a
+short lived script. `close()` flushes and stops the worker, and is registered to run at
+interpreter exit.
+
+## Converting without sending
+
+The mapping is available on its own, for sending through a client you already have:
+
+```python
+from widelog.otlp import to_otlp, to_otlp_batch
+
+payload = to_otlp(event)                 # one ExportLogsServiceRequest
+payload = to_otlp_batch(events)          # many, grouped by resource
+```
+
+Both take an optional second argument of extra resource attributes.

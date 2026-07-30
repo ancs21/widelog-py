@@ -2,7 +2,7 @@
 title: API
 description: Every exported function and class, the redaction rules, and the limits.
 sidebar:
-  order: 6
+  order: 7
   badge:
     text: Reference
     variant: info
@@ -21,7 +21,7 @@ Call once at startup. Later calls update only the keys you pass.
 | `service` | `str` | `$SERVICE_NAME` or `"app"` | Stamped on every event. |
 | `environment` | `str` | `$ENVIRONMENT` or `"development"` | Stamped on every event. |
 | `redact` | iterable of `str` | see [Redaction](#redaction) | Replaces the default name list. |
-| `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. |
+| `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. `OTLPSink` sends to a collector, see [OTLP](/guides/otlp). |
 | `stack_depth` | `int` | `5` | Frames kept per traceback, counted from the innermost. |
 
 ## Recording
