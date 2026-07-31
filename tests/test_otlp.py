@@ -109,41 +109,45 @@ def test_a_bool_is_not_an_int():
     assert attrs["cache_hit"] == {"boolValue": False}
 
 
-def test_nested_dicts_flatten_to_dotted_keys():
-    """The convention every OTLP backend indexes on."""
+def test_a_nested_dict_is_carried_as_json_text():
+    """Matches evlog: the object keeps its shape, as a string. A backend stores it
+    verbatim, so `user.id` is not a column and only substring matching reaches it.
+    """
     payload = to_otlp(event(user={"id": "u_1", "tier": "gold"}))
 
     attrs = attributes(payload)
-    assert attrs["user.id"] == {"stringValue": "u_1"}
-    assert attrs["user.tier"] == {"stringValue": "gold"}
-    assert "user" not in attrs
+    assert attrs["user"] == {"stringValue": '{"id":"u_1","tier":"gold"}'}
+    assert "user.id" not in attrs
 
 
-def test_a_list_of_objects_survives_as_a_structured_array():
+def test_a_list_is_carried_as_json_text_too():
     payload = to_otlp(event(items=[{"sku": "A", "qty": 2}, {"sku": "B", "qty": 1}]))
 
-    assert attributes(payload)["items"] == {
-        "arrayValue": {
-            "values": [
-                {
-                    "kvlistValue": {
-                        "values": [
-                            {"key": "sku", "value": {"stringValue": "A"}},
-                            {"key": "qty", "value": {"intValue": "2"}},
-                        ]
-                    }
-                },
-                {
-                    "kvlistValue": {
-                        "values": [
-                            {"key": "sku", "value": {"stringValue": "B"}},
-                            {"key": "qty", "value": {"intValue": "1"}},
-                        ]
-                    }
-                },
-            ]
-        }
-    }
+    assert attributes(payload)["items"] == {"stringValue": '[{"sku":"A","qty":2},{"sku":"B","qty":1}]'}
+
+
+def test_a_key_json_refuses_costs_the_field_and_not_the_batch():
+    """`json.dumps` takes `str`, `int`, `float`, `bool` and `None` keys and raises on
+    anything else, and `default=` rescues values but never keys. The sink serializes a
+    whole batch in one call, so one tuple-keyed dict would take up to `batch_size`
+    unrelated events with it -- the 2026.7.2 bug again, with a wider blast radius.
+    """
+    payload = to_otlp(event(grid={(0, 0): "empty"}))
+
+    assert attributes(payload)["grid"] == {"stringValue": "{(0, 0): 'empty'}"}
+
+
+def test_scalars_keep_their_types():
+    """Only the nested shapes become text. A number stays a number, so the fields
+    a backend aggregates on still work.
+    """
+    payload = to_otlp(event(total=99.5, retries=3, ok=True, name="cart"))
+
+    attrs = attributes(payload)
+    assert attrs["total"] == {"doubleValue": 99.5}
+    assert attrs["retries"] == {"intValue": "3"}
+    assert attrs["ok"] == {"boolValue": True}
+    assert attrs["name"] == {"stringValue": "cart"}
 
 
 # --- trace correlation -------------------------------------------------------
@@ -184,7 +188,7 @@ def test_the_error_message_becomes_the_body():
     payload = to_otlp(event(level="error", error={"message": "Payment failed", "code": "DECLINED"}))
 
     assert record(payload)["body"] == {"stringValue": "Payment failed"}
-    assert attributes(payload)["error.code"] == {"stringValue": "DECLINED"}
+    assert attributes(payload)["error"] == {"stringValue": '{"message":"Payment failed","code":"DECLINED"}'}
 
 
 def test_the_last_message_becomes_the_body_when_nothing_failed():

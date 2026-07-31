@@ -281,11 +281,11 @@ url-decoded, which is how Grafana writes them.
 
 One event becomes one log record. `service`, `environment`, `version`, and `region` become the
 resource attributes `service.name`, `deployment.environment`, `service.version`, and
-`cloud.region`. `level` becomes a severity, nested fields flatten to dotted keys, and the error
-message or the last message becomes the record body. A `trace_id` is promoted to the record's
-trace id only when it is genuinely 32 hex characters — an X-Ray header or a hand-rolled
-correlation id stays an ordinary attribute, where it is still searchable, instead of being
-rejected by the collector.
+`cloud.region`. `level` becomes a severity, scalars keep their type, nested fields are carried as
+JSON text, and the error message or the last message becomes the record body. A `trace_id` is
+promoted to the record's trace id only when it is genuinely 32 hex characters — an X-Ray header
+or a hand-rolled correlation id stays an ordinary attribute, where it is still searchable,
+instead of being rejected by the collector.
 
 Sending happens on a background thread. If the collector is slow or down, events queue and then
 drop, counted on `OTLPSink.dropped` and reported once on stderr. They never block the request or
