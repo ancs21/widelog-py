@@ -23,6 +23,7 @@ Call once at startup. Later calls update only the keys you pass.
 | `redact` | iterable of `str` | see [Redaction](#redaction) | Replaces the default name list. |
 | `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. `OTLPSink` sends to a collector, see [OTLP](/guides/otlp). |
 | `stack_depth` | `int` | `5` | Frames kept per traceback, counted from the innermost. |
+| `memory_headroom` | `float` | `0.95` | Fraction of a Lambda's memory limit that triggers an early emit, flagged `memory_critical`. `0` disables it. Unix only. See [AWS Lambda](/guides/aws-lambda). |
 
 ## Recording
 
@@ -82,7 +83,8 @@ Non-HTTP scopes such as `lifespan` and `websocket` pass through untouched.
 
 Decorator. Adds `request_id`, `cold_start`, `function`, `remaining_ms`, and `trace_id`, reads
 `method` and `path` from all three payload shapes, and emits early with `"timed_out": true`
-500ms before the deadline. See [AWS Lambda](/guides/aws-lambda).
+500ms before the deadline or `"memory_critical": true` near the memory limit. See
+[AWS Lambda](/guides/aws-lambda).
 
 ## Event shape
 
