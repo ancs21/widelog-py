@@ -7,6 +7,7 @@ because what is under test is whether the bytes arrive in the right shape.
 from __future__ import annotations
 
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -220,6 +221,56 @@ def test_the_caller_is_never_blocked_by_a_full_queue(capsys):
 
     assert sink.dropped > 0
     assert "dropped" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX only")
+def test_a_forked_child_can_still_send(collector):
+    """gunicorn --preload builds the sink in the master and then forks. A thread
+    does not survive that, so without help the child holds a queue nobody drains:
+    events pile up, then drop, and nothing says so. Telemetry stops silently.
+    """
+    sink = OTLPSink(endpoint=collector.endpoint)
+    init(service="checkout", sink=sink)
+
+    child = os.fork()
+    if child == 0:  # the worker process
+        try:
+            with wide_event(op="from-child"):
+                pass
+            sink.close()
+        finally:
+            os._exit(0)  # skip pytest's teardown in the child
+
+    os.waitpid(child, 0)
+    sink.close()
+
+    sent = {
+        attribute["value"]["stringValue"]
+        for request in collector.requests
+        for log_record in records(request)
+        for attribute in log_record["attributes"]
+        if attribute["key"] == "op"
+    }
+    assert "from-child" in sent
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork is POSIX only")
+def test_a_closed_sink_is_not_resurrected_by_a_fork(collector):
+    """The fork hook lives for the life of the process. It must not restart a
+    worker for a sink the application already finished with.
+    """
+    sink = OTLPSink(endpoint=collector.endpoint)
+    sink.close()
+
+    child = os.fork()
+    if child == 0:
+        try:
+            os._exit(0 if not sink._worker.is_alive() else 1)
+        finally:
+            os._exit(1)
+
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
 
 
 def test_an_endpoint_is_required():
