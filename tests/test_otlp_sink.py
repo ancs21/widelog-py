@@ -90,7 +90,7 @@ def test_an_event_arrives_at_the_collector_as_otlp(collector):
     assert record["severityText"] == "INFO"
     attrs = {a["key"]: a["value"] for a in record["attributes"]}
     assert attrs["op"] == {"stringValue": "checkout"}
-    assert attrs["user.id"] == {"stringValue": "u_1"}
+    assert attrs["user"] == {"stringValue": '{"id":"u_1"}'}
 
 
 def test_configured_headers_are_sent(collector):

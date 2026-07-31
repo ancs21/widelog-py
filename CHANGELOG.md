@@ -15,9 +15,10 @@ compatibility, so read the notes below before upgrading.
   A separate import, so nothing changes for a project writing NDJSON to stdout.
   - One event becomes one log record. `service`, `environment`, `version` and `region` become
     resource attributes under their OpenTelemetry names, `level` becomes a severity number,
-    nested fields flatten to dotted keys, and the error message or the last message becomes the
-    body. `trace_id` is promoted to the record's trace id only when it really is 32 hex
-    characters, so an X-Ray header stays an attribute rather than being rejected.
+    scalars keep their type, nested fields are carried as JSON text the way evlog carries them,
+    and the error message or the last message becomes the body. `trace_id` is promoted to the
+    record's trace id only when it really is 32 hex characters, so an X-Ray header stays an
+    attribute rather than being rejected.
   - Sending is on a background thread and batches whatever has queued. A collector that is slow
     or down costs events, never latency: the queue is bounded, drops are counted on
     `OTLPSink.dropped`, and nothing raises into the request being described.

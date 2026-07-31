@@ -70,7 +70,15 @@ def _is_id(value: Any, digits: int) -> bool:
 
 
 def _value(value: Any) -> dict[str, Any]:
-    """One Python value as an OTLP AnyValue."""
+    """One Python value as an OTLP AnyValue.
+
+    Scalars keep their type. Dicts and lists are carried as JSON text, matching
+    evlog. The object arrives at the backend with its shape intact and readable,
+    and full-text search reaches into it -- `match_all('99.5')` and
+    `str_match(cart, '99.5')` both find the row. What text cannot do is
+    arithmetic: `avg(cart_total)` has no column to average, because the nested
+    values are inside a string rather than fields of their own.
+    """
     # bool subclasses int, so it has to be tested first or True serializes as 1.
     if isinstance(value, bool):
         return {"boolValue": value}
@@ -78,23 +86,19 @@ def _value(value: Any) -> dict[str, Any]:
         return {"intValue": str(value)}
     if isinstance(value, float):
         return {"doubleValue": value}
-    if isinstance(value, list):
-        return {"arrayValue": {"values": [_value(item) for item in value]}}
-    if isinstance(value, dict):
-        # Inside a list there is no key to flatten onto, so the shape is kept.
-        return {"kvlistValue": {"values": [{"key": str(k), "value": _value(v)} for k, v in value.items()]}}
+    if isinstance(value, (dict, list)):
+        # Compact separators, so the text is byte-identical to JSON.stringify and
+        # a widelog record and an evlog record of the same event are the same bytes.
+        try:
+            return {"stringValue": json.dumps(value, default=str, separators=(",", ":"))}
+        except TypeError:
+            # `default=` rescues a value json cannot encode but never a key, and the
+            # sink serializes a whole batch at once. Falling back to repr costs this
+            # one field its JSON shape; raising would cost every event in the batch.
+            return {"stringValue": str(value)}
     if value is None:
         return {}
     return {"stringValue": value if isinstance(value, str) else str(value)}
-
-
-def _flatten(key: str, value: Any, out: list[dict[str, Any]]) -> None:
-    """Nested dicts become dotted keys, which is what OTLP backends index on."""
-    if isinstance(value, dict):
-        for inner, item in value.items():
-            _flatten(f"{key}.{inner}", item, out)
-    else:
-        out.append({"key": key, "value": _value(value)})
 
 
 def _body(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -135,7 +139,7 @@ def _log_record(event: dict[str, Any]) -> dict[str, Any]:
         if key == "span_id" and _is_id(value, 16):
             record["spanId"] = value
             continue
-        _flatten(key, value, attributes)
+        attributes.append({"key": key, "value": _value(value)})
     record["attributes"] = attributes
     return record
 
