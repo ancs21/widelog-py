@@ -15,6 +15,11 @@ import sys
 import threading
 import time
 import traceback
+
+try:  # Unix only. Lambda is Linux; the memory guard no-ops where this is absent.
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None  # type: ignore[assignment]
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -50,6 +55,11 @@ _RANK = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 
 _current: contextvars.ContextVar[WideEvent | None] = contextvars.ContextVar("widelog_event", default=None)
 
+# High enough that a function running hot does not seal its event every invocation,
+# low enough to land before the sandbox does. 0 disables the guard.
+_DEFAULT_MEMORY_HEADROOM = 0.95
+_MEMORY_POLL_SECONDS = 0.25
+
 _config: dict[str, Any] = {
     "service": os.getenv("SERVICE_NAME", "app"),
     "environment": os.getenv("ENVIRONMENT", "development"),
@@ -57,11 +67,13 @@ _config: dict[str, Any] = {
     "redact": ("password", "token", "secret", "authorization", "apikey", "cookie"),
     "sink": None,  # callable(dict) -> None; default is NDJSON on stdout
     "stack_depth": _DEFAULT_STACK_DEPTH,
+    # Fraction of the Lambda memory limit that triggers an early emit. 0 disables.
+    "memory_headroom": _DEFAULT_MEMORY_HEADROOM,
 }
 
 
 def init(**config: Any) -> None:
-    """Configure once at startup: service, environment, redact, sink."""
+    """Configure once at startup: service, environment, redact, sink, memory_headroom."""
     if "redact" in config:
         config["redact"] = tuple(_norm(key) for key in config["redact"])
     _config.update(config)
@@ -395,6 +407,14 @@ class WideEvent:
             return None
 
 
+def _as_int(value: Any) -> int | None:
+    """Lambda documents memory_limit_in_mb as an int and sometimes sends a string."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _record_status(log: WideEvent, status: int) -> None:
     """A 5xx is the one status that makes the whole event an error."""
     log.set(status=status)
@@ -478,6 +498,41 @@ def _lambda_fields(event: Any, context: Any) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def _peak_rss_mb() -> float:
+    """Peak RSS, which is what the sandbox kills on. ru_maxrss is KB on Linux, bytes on macOS."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
+
+
+@contextmanager
+def _memory_guard(log: WideEvent, limit_mb: int | None) -> Iterator[None]:
+    """Emit before the sandbox kills us for memory. That kill runs no Python at all,
+    so unlike a timeout there is nothing to hook: the event has to leave early or
+    never leave. Polls peak RSS, because the kill happens at the peak."""
+    headroom = _config["memory_headroom"]
+    if resource is None or not limit_mb or not headroom:
+        yield
+        return
+
+    ceiling = limit_mb * headroom
+    stop = threading.Event()
+
+    def emit_before_oom() -> None:
+        while not stop.wait(_MEMORY_POLL_SECONDS):
+            used = _peak_rss_mb()
+            if used >= ceiling:
+                log.set_level("error")
+                log.emit(memory_critical=True, rss_mb=round(used, 1), memory_limit_mb=limit_mb)
+                return
+
+    watcher = threading.Thread(target=emit_before_oom, daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
 @contextmanager
 def _timeout_guard(log: WideEvent, remaining: Callable[[], int] | None) -> Iterator[None]:
     """Emit before Lambda kills the process at the deadline, or the event is lost."""
@@ -502,8 +557,8 @@ def lambda_wide_event(handler: Callable[[Any, Any], Any]) -> Callable[[Any, Any]
     """One wide event per Lambda invocation.
 
     stdout is already CloudWatch Logs, so the default sink needs no drain. Emits
-    early if the invocation is about to hit its timeout, otherwise the process is
-    killed and the event is lost.
+    early if the invocation is about to hit its timeout or its memory limit,
+    otherwise the process is killed and the event is lost.
 
     ```python
     @lambda_wide_event
@@ -522,7 +577,12 @@ def lambda_wide_event(handler: Callable[[Any, Any], Any]) -> Callable[[Any, Any]
             _cold_start = False
 
         remaining = getattr(context, "get_remaining_time_in_millis", None)
-        with wide_event(**fields) as log, _timeout_guard(log, remaining):
+        limit_mb = _as_int(getattr(context, "memory_limit_in_mb", None))
+        with (
+            wide_event(**fields) as log,
+            _timeout_guard(log, remaining),
+            _memory_guard(log, limit_mb),
+        ):
             result = handler(event, context)
             status = _as_dict(result).get("statusCode")
             if isinstance(status, int):

@@ -23,8 +23,9 @@ class FakeContext:
     function_name = "checkout-fn"
     memory_limit_in_mb = 512
 
-    def __init__(self, remaining_ms: int) -> None:
+    def __init__(self, remaining_ms: int, memory_limit_in_mb: int = 512) -> None:
         self._remaining_ms = remaining_ms
+        self.memory_limit_in_mb = memory_limit_in_mb
 
     def get_remaining_time_in_millis(self) -> int:
         return self._remaining_ms
@@ -261,6 +262,50 @@ def test_lambda_emits_before_the_timeout_kills_us(seen, cold):
 
     (event,) = seen  # exactly one line: the guard's, not the late normal return
     assert event["timed_out"] is True and event["level"] == "error"
+
+
+def test_lambda_emits_before_the_sandbox_kills_us_for_memory(seen, cold):
+    @lambda_wide_event
+    def handler(event, context):
+        time.sleep(0.4)  # long enough for one poll to see the peak
+        use_logger().set(late="dropped")  # the guard already sealed the event
+        return {"statusCode": 200}
+
+    handler({}, FakeContext(30_000, memory_limit_in_mb=1))  # any process exceeds 1MB
+
+    (event,) = seen  # exactly one line, not the guard's plus the normal return
+    assert event["memory_critical"] is True and event["level"] == "error"
+    assert event["memory_limit_mb"] == 1 and event["rss_mb"] > 1
+    assert "late" not in event
+
+
+def test_memory_guard_leaves_a_function_under_its_limit_alone(seen, cold):
+    @lambda_wide_event
+    def handler(event, context):
+        time.sleep(0.4)
+        return {"statusCode": 200}
+
+    handler({}, FakeContext(30_000, memory_limit_in_mb=1_000_000))
+
+    (event,) = seen
+    assert "memory_critical" not in event and event["level"] == "info"
+
+
+def test_memory_headroom_of_zero_disables_the_guard(seen, cold):
+    init(memory_headroom=0)
+    try:
+
+        @lambda_wide_event
+        def handler(event, context):
+            time.sleep(0.4)
+            return {"statusCode": 200}
+
+        handler({}, FakeContext(30_000, memory_limit_in_mb=1))
+    finally:
+        init(memory_headroom=0.95)
+
+    (event,) = seen
+    assert "memory_critical" not in event
 
 
 def test_lambda_exception_emits_then_propagates(seen, cold):

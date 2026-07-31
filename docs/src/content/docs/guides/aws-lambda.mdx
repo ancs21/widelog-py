@@ -59,6 +59,33 @@ so if the handler does return afterwards, nothing is written twice.
   drops the data, so you can see the loss instead of wondering where a field went.
 </Aside>
 
+## The memory guard
+
+A timeout is a deadline you can see coming. Exceeding the memory limit is not: the sandbox kills
+the process with a signal that runs no Python at all, so there is no hook to emit from. The
+invocation simply disappears, and the wide event describing what it was doing disappears with it.
+
+So widelog watches instead of waiting. A background thread polls peak RSS, and once the function
+is within `memory_headroom` of its limit it emits early with `"memory_critical": true`.
+
+```json
+{ "level": "error", "memory_critical": true, "rss_mb": 972.4, "memory_limit_mb": 1024 }
+```
+
+`init(memory_headroom=...)` takes the fraction of the limit that triggers the emit, and defaults
+to `0.95`. Pass `0` to turn the guard off.
+
+The default sits deliberately close to the limit. Emitting seals the event, so a guard that fires
+too eagerly costs you the tail of every invocation that was never in danger. At `0.95` a function
+has to be genuinely close to the edge before it gives up its remaining fields.
+
+<Aside type="caution" title="A prediction, not a hook">
+  The guard fires on a threshold, not on the kill itself, so it can be wrong in both directions:
+  a function that allocates a large object between two polls can still die unannounced, and one
+  that runs hot but never dies seals its event early. Raise `memory_headroom` toward `1.0` to
+  favour complete events, lower it to favour catching the kill.
+</Aside>
+
 ## Cold starts
 
 `cold_start` is `true` on the first invocation in a container and absent afterwards, which makes
