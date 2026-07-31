@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 
 import pytest
 
+import widelog
 from widelog import (
     REDACTED,
     TRUNCATED,
@@ -264,10 +266,15 @@ def test_lambda_emits_before_the_timeout_kills_us(seen, cold):
     assert event["timed_out"] is True and event["level"] == "error"
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc, which is Lambda")
 def test_lambda_emits_before_the_sandbox_kills_us_for_memory(seen, cold):
+    """The one test that reads real memory, so a broken /proc parse cannot pass by
+    returning None and quietly switching the guard off.
+    """
+
     @lambda_wide_event
     def handler(event, context):
-        time.sleep(0.4)  # long enough for one poll to see the peak
+        time.sleep(0.4)  # long enough for one poll to see the usage
         use_logger().set(late="dropped")  # the guard already sealed the event
         return {"statusCode": 200}
 
@@ -277,6 +284,53 @@ def test_lambda_emits_before_the_sandbox_kills_us_for_memory(seen, cold):
     assert event["memory_critical"] is True and event["level"] == "error"
     assert event["memory_limit_mb"] == 1 and event["rss_mb"] > 1
     assert "late" not in event
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc, which is Lambda")
+def test_the_memory_reading_falls_again_once_the_memory_is_released():
+    """The property the whole guard rests on, and the one a peak reading does not
+    have. Guarded here rather than through the guard, because a test that fakes the
+    reading cannot notice the reading itself going back to a high-water mark.
+    """
+    before = widelog._current_rss_mb()
+
+    blob = bytearray(200 * 1024 * 1024)
+    for offset in range(0, len(blob), 4096):
+        blob[offset] = 1  # zero pages are not resident until touched
+    while_held = widelog._current_rss_mb()
+
+    del blob
+    after = widelog._current_rss_mb()
+
+    assert while_held > before + 100
+    assert after < while_held - 100
+
+
+def test_a_past_spike_does_not_condemn_every_later_invocation(seen, cold, monkeypatch):
+    """Lambda reuses one process for many invocations, so the guard has to read what
+    is resident now and not the high-water mark, which never falls. Reading the peak
+    latches the guard on after the first spike: every healthy invocation behind it is
+    flagged critical, and -- worse -- sealed early, losing the outcome it was
+    describing.
+    """
+    resident = {"mb": 1000.0}
+    monkeypatch.setattr(widelog, "_current_rss_mb", lambda: resident["mb"])
+
+    @lambda_wide_event
+    def handler(event, context):
+        time.sleep(0.4)
+        return {"statusCode": 200}
+
+    handler({}, FakeContext(30_000, memory_limit_in_mb=1024))  # ceiling is 972.8
+    assert seen[-1]["memory_critical"] is True
+
+    resident["mb"] = 20.0  # the spike is over and the memory went back
+    seen.clear()
+    handler({}, FakeContext(30_000, memory_limit_in_mb=1024))
+
+    (event,) = seen
+    assert "memory_critical" not in event and event["level"] == "info"
+    assert event["status"] == 200  # the outcome still made it onto the event
 
 
 def test_memory_guard_leaves_a_function_under_its_limit_alone(seen, cold):

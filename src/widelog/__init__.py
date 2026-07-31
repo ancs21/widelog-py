@@ -15,11 +15,6 @@ import sys
 import threading
 import time
 import traceback
-
-try:  # Unix only. Lambda is Linux; the memory guard no-ops where this is absent.
-    import resource
-except ImportError:  # pragma: no cover - Windows
-    resource = None  # type: ignore[assignment]
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -498,19 +493,30 @@ def _lambda_fields(event: Any, context: Any) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if v is not None}
 
 
-def _peak_rss_mb() -> float:
-    """Peak RSS, which is what the sandbox kills on. ru_maxrss is KB on Linux, bytes on macOS."""
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024
+def _current_rss_mb() -> float | None:
+    """What is resident right now, which is what the sandbox kills on.
+
+    Deliberately not the peak. Lambda reuses one process for many invocations and a
+    high-water mark never falls, so one spike would flag every invocation behind it
+    for the life of the container -- and seal each event early, losing the outcome
+    it was describing. /proc is Linux only, which is what Lambda runs; anywhere else
+    this returns None and the guard does not run at all.
+    """
+    try:
+        with open("/proc/self/statm") as statm:
+            resident_pages = int(statm.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+    except (AttributeError, OSError, IndexError, ValueError):
+        return None
 
 
 @contextmanager
 def _memory_guard(log: WideEvent, limit_mb: int | None) -> Iterator[None]:
     """Emit before the sandbox kills us for memory. That kill runs no Python at all,
     so unlike a timeout there is nothing to hook: the event has to leave early or
-    never leave. Polls peak RSS, because the kill happens at the peak."""
+    never leave."""
     headroom = _config["memory_headroom"]
-    if resource is None or not limit_mb or not headroom:
+    if not limit_mb or not headroom or _current_rss_mb() is None:
         yield
         return
 
@@ -519,8 +525,8 @@ def _memory_guard(log: WideEvent, limit_mb: int | None) -> Iterator[None]:
 
     def emit_before_oom() -> None:
         while not stop.wait(_MEMORY_POLL_SECONDS):
-            used = _peak_rss_mb()
-            if used >= ceiling:
+            used = _current_rss_mb()
+            if used is not None and used >= ceiling:
                 log.set_level("error")
                 log.emit(memory_critical=True, rss_mb=round(used, 1), memory_limit_mb=limit_mb)
                 return

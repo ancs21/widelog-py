@@ -23,7 +23,7 @@ Call once at startup. Later calls update only the keys you pass.
 | `redact` | iterable of `str` | see [Redaction](#redaction) | Replaces the default name list. |
 | `sink` | `Callable[[dict], None]` | `None` | Where events go. Unset writes NDJSON to stdout. `OTLPSink` sends to a collector, see [OTLP](/guides/otlp). |
 | `stack_depth` | `int` | `5` | Frames kept per traceback, counted from the innermost. |
-| `memory_headroom` | `float` | `0.95` | Fraction of a Lambda's memory limit that triggers an early emit, flagged `memory_critical`. `0` disables it. Unix only. See [AWS Lambda](/guides/aws-lambda). |
+| `memory_headroom` | `float` | `0.95` | Fraction of a Lambda's memory limit that triggers an early emit, flagged `memory_critical`. `0` disables it. Linux only, which is what Lambda runs. See [AWS Lambda](/guides/aws-lambda). |
 
 ## Recording
 
