@@ -13,15 +13,19 @@ compatibility, so read the notes below before upgrading.
 - A memory guard on `lambda_wide_event`. A Lambda that exceeds its memory limit is killed by the
   sandbox with a signal that runs no Python, so unlike a timeout there is nothing to hook: the
   buffered event never leaves, and the invocation that died leaves no record of what it was doing.
-  A background thread polls peak RSS and emits early once the function is within `memory_headroom`
-  of its limit, flagged `memory_critical` at error level. `emit()` is already idempotent, so a
-  function that survives the scare still writes exactly one line.
+  A background thread polls how much memory is resident and emits early once the function is
+  within `memory_headroom` of its limit, flagged `memory_critical` at error level. `emit()` is
+  already idempotent, so a function that survives the scare still writes exactly one line.
   - `init(memory_headroom=...)` is the fraction of the limit that triggers the early emit, and
     defaults to `0.95`. `0` disables the guard. The default sits close to the limit on purpose:
     emitting early seals the event, so a function that legitimately runs hot would otherwise lose
     the tail of every invocation it survived.
-  - `resource` is Unix-only, and `ru_maxrss` counts kilobytes on Linux but bytes on macOS. The
-    guard reads the platform for the unit and does nothing at all where the module is missing.
+  - The reading is what is resident at that moment, never the invocation's high-water mark. A warm
+    container runs many invocations in one process, and a mark that never falls would flag every
+    invocation behind the first spike -- sealing each of their events early, so the outcome the
+    event existed to record is the part that goes missing.
+  - Read from `/proc`, so the guard runs on Linux, which is what Lambda runs. Anywhere else it
+    does nothing rather than guess.
 - `widelog.otlp`, which exports wide events to any OTLP collector over HTTP with JSON, using
   nothing outside the standard library. `init(sink=OTLPSink(endpoint=...))` is the whole setup.
   A separate import, so nothing changes for a project writing NDJSON to stdout.
