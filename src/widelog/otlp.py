@@ -231,11 +231,41 @@ class OTLPSink:
         self.batch_size = batch_size
         self.dropped = 0
 
+        # Built once, not per request. urlopen() builds an opener every call, and
+        # building one resolves proxies -- which on macOS calls SystemConfiguration
+        # and aborts the whole process when it happens in a forked child. Doing it
+        # here means it happens before any fork, and never again.
+        self._opener = urllib.request.build_opener()
+
+        self._queue_size = queue_size
         self._closed = False
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=queue_size)
+        self._start_worker()
+        atexit.register(self.close)
+        if hasattr(os, "register_at_fork"):  # POSIX only
+            os.register_at_fork(after_in_child=self._restart_after_fork)
+
+    def _start_worker(self) -> None:
         self._worker = threading.Thread(target=self._run, name="widelog-otlp", daemon=True)
         self._worker.start()
-        atexit.register(self.close)
+
+    def _restart_after_fork(self) -> None:
+        """Give the child its own worker, because threads do not survive a fork.
+
+        Pre-fork servers -- gunicorn and uWSGI with --preload -- build the sink in
+        the master and then fork. Without this the child inherits a queue nobody
+        drains: events pile up, hit the cap, and drop. Nothing raises and nothing
+        reaches stderr, so telemetry stops and the process that stopped it never
+        finds out.
+
+        The queue is replaced rather than reused. Whatever was in it belongs to the
+        parent, which still has it and will send it, and a lock held by another
+        thread at the moment of the fork is left permanently locked in the child.
+        """
+        if self._closed:
+            return
+        self._queue = queue.Queue(maxsize=self._queue_size)
+        self._start_worker()
 
     def __call__(self, event: dict[str, Any]) -> None:
         if self._closed:
@@ -287,7 +317,7 @@ class OTLPSink:
             request = urllib.request.Request(
                 self.url, data=payload.encode(), headers=self.headers, method="POST"
             )
-            with urllib.request.urlopen(request, timeout=self.timeout):
+            with self._opener.open(request, timeout=self.timeout):
                 pass
         except urllib.error.HTTPError as exc:
             # The body is where a collector says which field it disliked. Without

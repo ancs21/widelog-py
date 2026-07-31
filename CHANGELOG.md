@@ -22,6 +22,10 @@ compatibility, so read the notes below before upgrading.
   - Sending is on a background thread and batches whatever has queued. A collector that is slow
     or down costs events, never latency: the queue is bounded, drops are counted on
     `OTLPSink.dropped`, and nothing raises into the request being described.
+  - Survives `fork()`, so gunicorn and uWSGI with `--preload` work. A thread does not cross a
+    fork, so each child gets a fresh worker and its own queue. The proxy lookup is resolved once
+    at startup rather than per request, which is also what stops a forked child aborting on
+    macOS the moment it tries to send.
   - Verified against `otel/opentelemetry-collector-contrib`, not only against its own tests.
 - `examples/microservices.py`: a gateway and a downstream service, each emitting its own event,
   joined by one forwarded header. The gateway records what the call cost and what came back.
